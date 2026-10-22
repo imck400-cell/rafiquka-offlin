@@ -1,0 +1,77 @@
+@import "tailwindcss";
+
+body {
+  font-family: 'Cairo', sans-serif;
+}
+
+/* إخفاء شريط التمرير للمكونات التي تدعم التمرير العرضي */
+.scrollbar-hide::-webkit-scrollbar {
+  display: none;
+}
+.scrollbar-hide {
+  -ms-overflow-style: none;
+  scrollbar-width: none;
+}
+.custom-scrollbar::-webkit-scrollbar {
+  width: 10px;
+  height: 10px;
+}
+.custom-scrollbar::-webkit-scrollbar-track {
+  background: #f1f5f9;
+  border-radius: 10px;
+}
+.custom-scrollbar::-webkit-scrollbar-thumb {
+  background: #cbd5e1;
+  border-radius: 10px;
+  border: 2px solid #f1f5f9;
+}
+.custom-scrollbar::-webkit-scrollbar-thumb:hover {
+  background: #94a3b8;
+}
+
+@media print {
+  body * {
+    visibility: hidden;
+  }
+  .PrintSection, .PrintSection * {
+    visibility: visible;
+  }
+  .PrintSection {
+    position: absolute;
+    left: 0;
+    top: 0;
+    width: 100%;
+    margin: 0;
+    padding: 0;
+    box-shadow: none !important;
+  }
+  .hide-on-print {
+    display: none !important;
+  }
+}
+
+@keyframes loadingDots {
+  0%, 100% {
+    opacity: 0.25;
+    transform: scale(0.85);
+  }
+  50% {
+    opacity: 1;
+    transform: scale(1.15);
+  }
+}
+
+.animate-dot1 {
+  animation: loadingDots 1.4s infinite ease-in-out;
+  animation-delay: 0s;
+}
+
+.animate-dot2 {
+  animation: loadingDots 1.4s infinite ease-in-out;
+  animation-delay: 0.2s;
+}
+
+.animate-dot3 {
+  animation: loadingDots 1.4s infinite ease-in-out;
+  animation-delay: 0.4s;
+}
