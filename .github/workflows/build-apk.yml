@@ -20,30 +20,40 @@ jobs:
           node-version: 20
           cache: 'npm'
 
-      - name: Install Dependencies
-        run: npm install --legacy-peer-deps
-
-      - name: Build Web App
-        run: npm run build
-
       - name: Setup Java JDK
         uses: actions/setup-java@v4
         with:
           distribution: 'zulu'
           java-version: '17'
 
-      - name: Build Android APK with Gradle
+      - name: Setup Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Install Dependencies
+        run: npm install --legacy-peer-deps
+
+      - name: Build Web Production Assets
+        run: npm run build
+
+      - name: Sync Capacitor Android
+        run: |
+          if [ ! -d "android" ]; then
+            npx cap add android || true
+          fi
+          npx cap sync android || true
+
+      - name: Build APK with Gradle
         run: |
           if [ -d "android" ]; then
             cd android
             chmod +x gradlew || true
-            ./gradlew assembleDebug || gradle assembleDebug
+            ./gradlew assembleDebug --stacktrace
           else
             chmod +x gradlew || true
-            ./gradlew :app:assembleDebug || gradle :app:assembleDebug
+            ./gradlew :app:assembleDebug --stacktrace
           fi
 
-      - name: Upload APK
+      - name: Upload APK Artifact
         uses: actions/upload-artifact@v4
         with:
           name: rafiquk-school-app
