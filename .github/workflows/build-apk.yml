@@ -1,13 +1,10 @@
-أنشئ ملفاً جديداً في المشروع بالمسار التالي:
-.github/workflows/build-apk.yml
-
-وضع بداخله كود أتمتة بناء الـ APK التالي:
-
 name: Build Android APK
 
 on:
   push:
-    branches: [ main, master ]
+    branches:
+      - main
+      - master
   workflow_dispatch:
 
 jobs:
@@ -23,10 +20,10 @@ jobs:
           node-version: 20
           cache: 'npm'
 
-      - name: Install Web Dependencies
-        run: npm ci || npm install
+      - name: Install Dependencies
+        run: npm install --legacy-peer-deps
 
-      - name: Build Web Production Assets
+      - name: Build Web App
         run: npm run build
 
       - name: Setup Java JDK
@@ -35,16 +32,22 @@ jobs:
           distribution: 'zulu'
           java-version: '17'
 
-      - name: Setup Gradle
-        uses: gradle/actions/setup-gradle@v3
-
-      - name: Build Debug APK
+      - name: Build Android APK with Gradle
         run: |
-          chmod +x gradlew || true
-          gradle :app:assembleDebug
+          if [ -d "android" ]; then
+            cd android
+            chmod +x gradlew || true
+            ./gradlew assembleDebug || gradle assembleDebug
+          else
+            chmod +x gradlew || true
+            ./gradlew :app:assembleDebug || gradle :app:assembleDebug
+          fi
 
-      - name: Upload APK Artifact
+      - name: Upload APK
         uses: actions/upload-artifact@v4
         with:
           name: rafiquk-school-app
-          path: app/build/outputs/apk/debug/*.apk
+          path: |
+            **/build/outputs/apk/debug/*.apk
+            android/app/build/outputs/apk/debug/*.apk
+            app/build/outputs/apk/debug/*.apk
