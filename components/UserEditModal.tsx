@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from "react";
+import React, { useState, useEffect, useRef } from "react";
 import { localDB } from "../src/lib/localDB";
 import { stampRecord } from "../src/lib/recordStamping";
 import { useGlobal } from "../context/GlobalState";
@@ -15,12 +15,62 @@ import {
   Download,
   Upload,
   Loader2,
+  ChevronDown,
 } from "lucide-react";
 import { motion, AnimatePresence } from "framer-motion";
 import { User as UserType, UserPermissions } from "../types";
 import ConfirmDialog from "./ConfirmDialog";
 import { toast } from "sonner";
 import * as XLSX from "xlsx-js-style";
+
+const jobsOptions = [
+  "المشرف العام",
+  "نائب المشرف العام",
+  "مدير عام",
+  "مدير فرع",
+  "الإدارة المالية",
+  "المحاسب",
+  "أمين صندوق",
+  "وكيل إداري",
+  "وكيل أكاديمي",
+  "مدير الموارد البشرية",
+  "إدارة الجودة",
+  "مدير العلاقات",
+  "المشرف التربوي",
+  "المشرف الأكاديمي",
+  "المشرف الإداري",
+  "السكرتارية",
+  "المختص الاجتماعي",
+  "مسؤول معمل العلوم",
+  "مسؤول الوسائل",
+  "مسؤول المكتبة",
+  "مسؤول الأنشطة",
+  "معلم فنية",
+  "معلم الرياضة",
+  "معلم مادة",
+  "مربية",
+  "مسؤول الحركة",
+  "الحراسة",
+  "مهندس البيئة",
+  "مسؤول المقصف",
+];
+
+const subjectsOptions = [
+  "مربية",
+  "القرآن الكريم",
+  "التربية الإسلامية",
+  "اللغة العربية",
+  "اللغة الإنجليزية",
+  "الرياضيات",
+  "العلوم",
+  "الكيمياء",
+  "الفيزياء",
+  "الأحياء",
+  "الاجتماعيات",
+  "الحاسوب",
+  "الإرشاد",
+  "المهارات الحياتية",
+];
 
 const gradesOptions = [
   "تمهيدي",
@@ -229,10 +279,12 @@ export const getPermissionsForJobs = (
 ): UserPermissions => {
   const managedUserIds = currentPerms.managedUserIds;
   const schoolsAndBranches = currentPerms.schoolsAndBranches;
+  const comprehensiveIndicatorsUsers = currentPerms.comprehensiveIndicatorsUsers;
 
   let newPerms: UserPermissions = {
     managedUserIds,
     schoolsAndBranches,
+    comprehensiveIndicatorsUsers,
     all: false,
     readOnly: false,
     specialCodes: ["hideButton"], // Default is hide
@@ -469,6 +521,11 @@ const UserEditModal: React.FC<UserEditModalProps> = ({
   const [formData, setFormData] = useState<UserType | null>(null);
   const [selectAll, setSelectAll] = useState(false);
   const [isSaving, setIsSaving] = useState(false);
+  const [openDropdown, setOpenDropdown] = useState<
+    "job" | "subjects" | "grades" | "sections" | null
+  >(null);
+  const [dropdownSearch, setDropdownSearch] = useState("");
+  const dropdownsWrapperRef = useRef<HTMLDivElement>(null);
   const [confirmDialog, setConfirmDialog] = useState<{
     isOpen: boolean;
     title: string;
@@ -485,15 +542,34 @@ const UserEditModal: React.FC<UserEditModalProps> = ({
     onConfirm: () => {},
   });
 
+  useEffect(() => {
+    const handleClickOutside = (event: MouseEvent) => {
+      if (
+        dropdownsWrapperRef.current &&
+        !dropdownsWrapperRef.current.contains(event.target as Node)
+      ) {
+        setOpenDropdown(null);
+      }
+    };
+    document.addEventListener("mousedown", handleClickOutside);
+    return () => {
+      document.removeEventListener("mousedown", handleClickOutside);
+    };
+  }, []);
+
   const halfLength = Math.ceil(permissionsList.length / 2);
   const column1Permissions = permissionsList.slice(0, halfLength);
   const column2Permissions = permissionsList.slice(halfLength);
 
   const renderPermissionCard = (perm: typeof permissionsList[0]) => {
+    const permVal = formData?.permissions?.[perm.id as keyof UserPermissions];
     const isChecked = perm.subPermissions
-      ? Array.isArray(formData?.permissions?.[perm.id as keyof UserPermissions]) &&
-        (formData.permissions?.[perm.id as keyof UserPermissions] as string[]).length === perm.subPermissions.length
-      : !!formData?.permissions?.[perm.id as keyof UserPermissions];
+      ? Array.isArray(permVal) &&
+        permVal.some(
+          (id) =>
+            id !== "disable" && id !== "hideButton" && id !== "disable_button"
+        )
+      : !!permVal;
 
     return (
       <div
@@ -1001,15 +1077,19 @@ const UserEditModal: React.FC<UserEditModalProps> = ({
         schools: user.schools || [],
         academicYears: user.academicYears || [],
         subjects: user.subjects || [],
+        grades: user.grades || [],
+        sections: user.sections || [],
         permissions: {
           ...user.permissions,
           schoolsAndBranches: user.permissions?.schoolsAndBranches || {},
           managedUserIds: user.permissions?.managedUserIds || [],
-        }
+        },
       });
       setSelectAll(user.permissions?.all || false);
+      setOpenDropdown(null);
+      setDropdownSearch("");
     }
-  }, [user]);
+  }, [user, isOpen]);
 
   if (!isOpen || !formData) return null;
 
@@ -1065,33 +1145,39 @@ const UserEditModal: React.FC<UserEditModalProps> = ({
               nextSubs = nextSubs.filter((id) => id !== "showButton");
           }
           newPermissions[key] = nextSubs as any;
-
-          // Check if all children of this parent are now checked
-          const parent = permissionsList.find((p) => p.id === key);
-          if (parent && parent.subPermissions) {
-            const allChecked = parent.subPermissions.every((s) =>
-              (newPermissions[key] as string[]).includes(s.id),
-            );
-            if (allChecked) {
-              // We could auto-check parent here if we wanted, but the user didn't explicitly ask for it.
-              // However, the user said "عند الضغط على علامة صح لأي معيار ... يتم وضع علامة صح على جميع ما تحته".
-              // This implies the parent is a boolean or a container.
-            }
-          }
         }
       } else {
         // Parent toggled
-        const isChecking = !newPermissions[key];
-        newPermissions[key] = isChecking as any;
-
-        // If parent has children, toggle them all
         const parent = permissionsList.find((p) => p.id === key);
+        const currentVal = newPermissions[key];
+        const isCurrentlyChecked = parent?.subPermissions
+          ? Array.isArray(currentVal) &&
+            currentVal.some(
+              (id) =>
+                id !== "disable" &&
+                id !== "hideButton" &&
+                id !== "disable_button"
+            )
+          : !!currentVal;
+        const isChecking = !isCurrentlyChecked;
+
         if (parent && parent.subPermissions) {
           if (isChecking) {
-            newPermissions[key] = parent.subPermissions.map((s) => s.id) as any;
+            newPermissions[key] = parent.subPermissions
+              .filter(
+                (s) =>
+                  s.id !== "disable" &&
+                  s.id !== "hideButton" &&
+                  s.id !== "disable_button"
+              )
+              .map((s) => s.id) as any;
           } else {
-            newPermissions[key] = [] as any;
+            newPermissions[key] = (
+              key === "specialCodes" ? ["hideButton"] : []
+            ) as any;
           }
+        } else {
+          newPermissions[key] = isChecking as any;
         }
 
         if (!isChecking) {
@@ -1099,14 +1185,24 @@ const UserEditModal: React.FC<UserEditModalProps> = ({
         }
       }
 
-      // Update selectAll state based on whether everything is checked
-      const isAllChecked = permissionsList.every((p) => {
-        const val = newPermissions[p.id as keyof UserPermissions];
-        if (p.subPermissions) {
-          return Array.isArray(val) && val.length === p.subPermissions.length;
-        }
-        return !!val;
-      });
+      // Update selectAll state based on whether all positive permissions are checked
+      const isAllChecked = permissionsList
+        .filter((p) => p.id !== "readOnly")
+        .every((p) => {
+          const val = newPermissions[p.id as keyof UserPermissions];
+          if (p.subPermissions) {
+            return (
+              Array.isArray(val) &&
+              val.some(
+                (id) =>
+                  id !== "disable" &&
+                  id !== "hideButton" &&
+                  id !== "disable_button"
+              )
+            );
+          }
+          return !!val;
+        });
       setSelectAll(isAllChecked);
       newPermissions.all = isAllChecked;
 
@@ -1118,18 +1214,34 @@ const UserEditModal: React.FC<UserEditModalProps> = ({
     setSelectAll(checked);
     setFormData((prev) => {
       if (!prev) return null;
-      const newPermissions: UserPermissions = { all: checked };
+      const newPermissions: UserPermissions = {
+        all: checked,
+        schoolsAndBranches: prev.permissions?.schoolsAndBranches,
+        managedUserIds: prev.permissions?.managedUserIds,
+        comprehensiveIndicatorsUsers:
+          prev.permissions?.comprehensiveIndicatorsUsers,
+      };
       permissionsList.forEach((p) => {
         if (checked) {
           if (p.subPermissions) {
-            newPermissions[p.id as keyof UserPermissions] =
-              p.subPermissions.map((s) => s.id) as any;
+            newPermissions[p.id as keyof UserPermissions] = p.subPermissions
+              .filter(
+                (s) =>
+                  s.id !== "disable" &&
+                  s.id !== "hideButton" &&
+                  s.id !== "disable_button"
+              )
+              .map((s) => s.id) as any;
           } else {
-            newPermissions[p.id as keyof UserPermissions] = true as any;
+            newPermissions[p.id as keyof UserPermissions] = (
+              p.id === "readOnly" ? false : true
+            ) as any;
           }
         } else {
           if (p.subPermissions) {
-            newPermissions[p.id as keyof UserPermissions] = [] as any;
+            newPermissions[p.id as keyof UserPermissions] = (
+              p.id === "specialCodes" ? ["hideButton"] : []
+            ) as any;
           } else {
             newPermissions[p.id as keyof UserPermissions] = false as any;
           }
@@ -1543,234 +1655,65 @@ End Sub`;
     }
   };
 
-  const getPermissionsForJobs = (
-    newJobs: string[],
-    currentPerms: UserPermissions = {},
-    isImport = false
-  ): UserPermissions => {
-    const managedUserIds = currentPerms.managedUserIds;
-    const schoolsAndBranches = currentPerms.schoolsAndBranches;
+  const applyJobsSelection = (newJobs: string[]) => {
+    if (!formData) return;
+    const jobTitleStr = newJobs.join(", ");
 
-    let newPerms: UserPermissions = {
-      managedUserIds,
-      schoolsAndBranches,
-      all: false,
-      readOnly: false,
-      specialCodes: ["hideButton"], // Default is hide
+    const isSuperAdminJob =
+      newJobs.includes("المشرف العام") ||
+      newJobs.includes("نائب المشرف العام");
+    const isMgmtJob = newJobs.some((j) =>
+      ["مدير عام", "مدير فرع", "مدير عام المدارس"].includes(j)
+    );
+    const isSecOrQuality = newJobs.some((j) =>
+      ["السكرتارية", "إدارة الجودة", "الجودة"].includes(j)
+    );
+
+    let newGrades = formData.grades || [];
+    let newSections = formData.sections || [];
+    let newSchools = formData.schools || [];
+    const nextRole: "admin" | "user" =
+      isSuperAdminJob || isMgmtJob ? "admin" : "user";
+
+    const sab: Record<string, string[]> = {
+      ...(formData.permissions?.schoolsAndBranches || {}),
     };
 
-    // Helper to merge sub-permissions without duplication
-    const addSubPerms = (key: keyof UserPermissions, subPerms: string[]) => {
-      const current = Array.isArray(newPerms[key]) ? (newPerms[key] as string[]) : [];
-      newPerms[key] = Array.from(new Set([...current, ...subPerms])) as any;
-    };
-
-    // 1. Check if they are Super Admin ("المشرف العام" or "نائب المشرف العام")
-    const isSuperAdmin = newJobs.includes("المشرف العام") || newJobs.includes("نائب المشرف العام");
-
-    if (isSuperAdmin) {
-      newPerms.all = true;
-      newPerms.dashboard = ["view", "allowEdits"];
-      newPerms.dailyFollowUp = ["view", "allowEdits"];
-      newPerms.adminFollowUp = ["view", "allowEdits"];
-      newPerms.studentAffairs = ["view", "allowEdits"];
-      newPerms.substitutions = ["view", "allowEdits"];
-      newPerms.schoolProfile = ["view", "allowEdits"];
-      newPerms.secretariat = ["showButton", "allowEdits"];
-      newPerms.userManagement = ["view", "allowEdits"];
-      newPerms.issuesModal = ["view", "allowEdits", "useIssuesButton", "viewAllIssues"];
-      newPerms.trainingCourses = ["view", "allowEdits", "editSchema", "viewIndicators"];
-      newPerms.caseStudyModal = ["view", "allowEdits"];
-      newPerms.comprehensiveIndicators = ["view", "allowEdits", "showButton", "managePermissions"];
-      newPerms.specialReports = ["view", "allowEdits", "absenceLog", "latenessLog", "violationLog", "exitLog", "damageLog", "parentVisitLog", "examLog", "taskReports"];
-      newPerms.specialCodes = ["showButton", "allowEdits"];
-      newPerms.teacherPortal = [
-        "view",
-        "archivePrep",
-        "newPrep",
-        "studentEval",
-        "gradesSheet",
-        "selfEval",
-        "allowEdits",
-        "editEvaluationTemplate",
-        "prepStats",
-        "viewTeachersPrep",
-        "controlSupervisionPanel"
-      ];
-      newPerms.educationalSupervision = ["view", "allowEdits"];
-      newPerms.transport = ["dashboardTab", "configTab", "supervisorCheckTab", "trafficManagerTab"];
-      newPerms.communicationDev = ["circulars", "surveys", "homework", "viewDetails"];
-      newPerms.gradeSheets = ["view_button", "edit_data"];
-      newPerms.schoolActivities = ["view", "allowEdits"];
-      newPerms.finance = ["view", "allowEdits"];
-      newPerms.readOnly = false;
-      return newPerms;
+    if (isSuperAdminJob || isMgmtJob || isSecOrQuality) {
+      newGrades = [...gradesOptions];
+      newSections = [...sectionsOptions];
+      if (newSchools.length === 0) {
+        newSchools = (data.availableSchools || []).filter(Boolean);
+      }
+      newSchools.forEach((school) => {
+        if (!sab[school] || sab[school].length === 0) {
+          sab[school] = data.schoolBranches?.[school] || ["المركز الرئيسي"];
+        }
+      });
     }
 
-    // 2. Regular Job Mappings
-    newJobs.forEach((j) => {
-      // Add "view" for trainingCourses to all users by default
-      addSubPerms("trainingCourses", ["view"]);
+    const newPerms = getPermissionsForJobs(
+      newJobs,
+      {
+        ...(formData.permissions || {}),
+        schoolsAndBranches: sab,
+      },
+      false
+    );
 
-      // Group A: مدير عام & مدير فرع
-      if (j === "مدير عام" || j === "مدير فرع" || j === "مدير عام المدارس") {
-        addSubPerms("dashboard", ["view", "allowEdits"]);
-        addSubPerms("dailyFollowUp", ["view", "allowEdits"]);
-        addSubPerms("adminFollowUp", ["view", "allowEdits"]);
-        addSubPerms("studentAffairs", ["view", "allowEdits"]);
-        addSubPerms("substitutions", ["view", "allowEdits"]);
-        addSubPerms("schoolProfile", ["view", "allowEdits"]);
-        addSubPerms("teacherPortal", ["view", "allowEdits", "archivePrep", "newPrep", "studentEval", "gradesSheet", "selfEval", "editEvaluationTemplate", "prepStats", "viewTeachersPrep"]);
-        addSubPerms("educationalSupervision", ["view", "allowEdits"]);
-        addSubPerms("issuesModal", ["view", "allowEdits", "viewAllIssues"]);
-        addSubPerms("trainingCourses", ["view", "allowEdits", "editSchema", "viewIndicators"]);
-        addSubPerms("caseStudyModal", ["view", "allowEdits"]);
-        addSubPerms("gradeSheets", ["view_button", "edit_data"]);
-        addSubPerms("transport", ["dashboardTab", "configTab", "supervisorCheckTab", "trafficManagerTab"]);
-        addSubPerms("specialReports", ["view", "allowEdits", "absenceLog", "latenessLog", "violationLog", "exitLog", "damageLog", "parentVisitLog", "examLog", "taskReports"]);
-        addSubPerms("communicationDev", ["circulars", "surveys", "homework", "viewDetails"]);
-        addSubPerms("schoolActivities", ["view", "allowEdits"]);
-        addSubPerms("finance", ["view", "allowEdits"]);
-        newPerms.readOnly = true;
-      }
-      // Group B: إدارة الجودة & السكرتارية
-      else if (j === "إدارة الجودة" || j === "السكرتارية") {
-        addSubPerms("dashboard", ["view", "allowEdits"]);
-        addSubPerms("dailyFollowUp", ["view", "allowEdits"]);
-        addSubPerms("adminFollowUp", ["view", "allowEdits"]);
-        addSubPerms("studentAffairs", ["view", "allowEdits"]);
-        addSubPerms("substitutions", ["view", "allowEdits"]);
-        addSubPerms("schoolProfile", ["view", "allowEdits"]);
-        addSubPerms("secretariat", ["showButton", "allowEdits"]);
-        addSubPerms("teacherPortal", ["view", "allowEdits", "archivePrep", "newPrep", "studentEval", "gradesSheet", "selfEval", "editEvaluationTemplate", "prepStats", "viewTeachersPrep"]);
-        addSubPerms("educationalSupervision", ["view", "allowEdits"]);
-        addSubPerms("issuesModal", ["view", "allowEdits", "viewAllIssues"]);
-        addSubPerms("trainingCourses", ["view", "allowEdits", "editSchema", "viewIndicators"]);
-        addSubPerms("caseStudyModal", ["view", "allowEdits"]);
-        addSubPerms("gradeSheets", ["view_button", "edit_data"]);
-        addSubPerms("transport", ["dashboardTab", "configTab", "supervisorCheckTab", "trafficManagerTab"]);
-        addSubPerms("specialReports", ["view", "allowEdits", "absenceLog", "latenessLog", "violationLog", "exitLog", "damageLog", "parentVisitLog", "examLog", "taskReports"]);
-        addSubPerms("communicationDev", ["circulars", "surveys", "homework", "viewDetails"]);
-        addSubPerms("schoolActivities", ["view", "allowEdits"]);
-        addSubPerms("finance", ["view", "allowEdits"]);
-        newPerms.readOnly = true;
-      }
-      // Group C: الإدارة المالية & المحاسب & أمين صندوق
-      else if (j === "إدارة المالية" || j === "الإدارة المالية" || j === "المحاسب" || j === "أمين صندوق") {
-        addSubPerms("dashboard", ["view", "allowEdits"]);
-        addSubPerms("schoolProfile", ["view", "allowEdits"]);
-        addSubPerms("issuesModal", ["view", "allowEdits", "viewAllIssues"]);
-        addSubPerms("trainingCourses", ["view", "allowEdits", "editSchema", "viewIndicators"]);
-        addSubPerms("communicationDev", ["circulars", "surveys"]);
-        addSubPerms("finance", ["view", "allowEdits"]);
-      }
-      // Group D: وكيل إداري & مدير الموارد البشرية & مدير العلاقات
-      else if (j === "وكيل إداري" || j === "مدير الموارد البشرية" || j === "مدير العلاقات") {
-        addSubPerms("dashboard", ["view", "allowEdits"]);
-        addSubPerms("dailyFollowUp", ["view", "allowEdits"]);
-        addSubPerms("adminFollowUp", ["view", "allowEdits"]);
-        addSubPerms("studentAffairs", ["view", "allowEdits"]);
-        addSubPerms("substitutions", ["view", "allowEdits"]);
-        addSubPerms("schoolProfile", ["view", "allowEdits"]);
-        addSubPerms("teacherPortal", ["view", "archivePrep"]);
-        if (j === "مدير الموارد البشرية") {
-          addSubPerms("teacherPortal", ["prepStats", "viewTeachersPrep"]);
-        }
-        addSubPerms("educationalSupervision", ["view", "allowEdits"]);
-        addSubPerms("issuesModal", ["view", "allowEdits", "viewAllIssues"]);
-        addSubPerms("trainingCourses", ["view", "allowEdits", "editSchema", "viewIndicators"]);
-        addSubPerms("caseStudyModal", ["view", "allowEdits"]);
-        addSubPerms("gradeSheets", ["view_button", "edit_data"]);
-        addSubPerms("specialReports", ["view", "allowEdits", "taskReports"]);
-        addSubPerms("communicationDev", ["circulars", "surveys", "homework", "viewDetails"]);
-        newPerms.readOnly = true;
-      }
-      // Group E: وكيل أكاديمي & المشرف التربوي & المشرف الأكاديمي
-      else if (j === "وكيل أكاديمي" || j === "المشرف التربوي" || j === "المشرف الأكاديمي") {
-        addSubPerms("dashboard", ["view", "allowEdits"]);
-        addSubPerms("dailyFollowUp", ["view", "allowEdits"]);
-        addSubPerms("studentAffairs", ["view", "allowEdits"]);
-        addSubPerms("substitutions", ["view", "allowEdits"]);
-        addSubPerms("schoolProfile", ["view", "allowEdits"]);
-        addSubPerms("teacherPortal", ["view", "archivePrep"]);
-        if (j === "وكيل أكاديمي" || j === "المشرف التربوي") {
-          addSubPerms("teacherPortal", ["prepStats", "viewTeachersPrep"]);
-        }
-        if (j === "المشرف التربوي") {
-          addSubPerms("teacherPortal", ["controlSupervisionPanel"]);
-        }
-        addSubPerms("educationalSupervision", ["view", "allowEdits"]);
-        addSubPerms("issuesModal", ["view", "allowEdits", "viewAllIssues"]);
-        addSubPerms("trainingCourses", ["view", "allowEdits", "editSchema", "viewIndicators"]);
-        addSubPerms("communicationDev", ["circulars", "surveys"]);
-        if (j === "وكيل أكاديمي") {
-          addSubPerms("schoolActivities", ["view", "allowEdits"]);
-          addSubPerms("finance", ["view", "allowEdits"]);
-        }
-        newPerms.readOnly = true;
-      }
-      // Group F: المشرف الإداري
-      else if (j === "المشرف الإداري") {
-        addSubPerms("dashboard", ["view", "allowEdits"]);
-        addSubPerms("dailyFollowUp", ["view", "allowEdits"]);
-        addSubPerms("studentAffairs", ["view", "allowEdits"]);
-        addSubPerms("substitutions", ["view", "allowEdits"]);
-        addSubPerms("schoolProfile", ["view", "allowEdits"]);
-        addSubPerms("teacherPortal", ["view", "archivePrep", "prepStats", "viewTeachersPrep"]);
-        addSubPerms("issuesModal", ["view", "allowEdits", "viewAllIssues"]);
-        addSubPerms("trainingCourses", ["view", "allowEdits", "editSchema", "viewIndicators"]);
-        addSubPerms("caseStudyModal", ["view", "allowEdits"]);
-        addSubPerms("specialReports", ["view", "allowEdits", "absenceLog", "latenessLog", "violationLog", "exitLog", "damageLog", "parentVisitLog", "examLog", "taskReports"]);
-        addSubPerms("communicationDev", ["circulars", "surveys", "homework", "viewDetails"]);
-      }
-      // Group G: المختص الاجتماعي & مسؤول معمل العلوم & مسؤول الوسائل & مسؤول المكتبة & مسؤول الأنشطة & معلم فنية & معلم الرياضة
-      else if (
-        j === "المختص الاجتماعي" ||
-        j === "مسؤول معمل العلوم" ||
-        j === "مسؤول الوسائل" ||
-        j === "مسؤول المكتبة" ||
-        j === "مسؤول الأنشطة" ||
-        j === "معلم فنية" ||
-        j === "معلم الرياضة"
-      ) {
-        addSubPerms("schoolProfile", ["view", "allowEdits"]);
-        addSubPerms("specialReports", ["view", "allowEdits", "taskReports"]);
-        addSubPerms("issuesModal", ["view", "allowEdits", "viewAllIssues"]);
-        addSubPerms("trainingCourses", ["view", "allowEdits", "editSchema", "viewIndicators"]);
-        addSubPerms("communicationDev", ["circulars", "surveys"]);
-        if (j === "المختص الاجتماعي") {
-          addSubPerms("caseStudyModal", ["view", "allowEdits"]);
-        }
-        if (j === "مسؤول الأنشطة") {
-          addSubPerms("schoolActivities", ["view", "allowEdits"]);
-        }
-      }
-      // Group H: معلم مادة & مربية
-      else if (j === "معلم مادة" || j === "معلم" || j === "مربية") {
-        addSubPerms("schoolProfile", ["view", "allowEdits"]);
-        addSubPerms("teacherPortal", ["view", "allowEdits", "archivePrep", "newPrep", "studentEval", "gradesSheet", "selfEval", "editEvaluationTemplate"]);
-        addSubPerms("gradeSheets", ["view_button", "edit_data"]);
-        addSubPerms("communicationDev", ["circulars", "surveys", "homework"]);
-      }
-      // Group I: مسؤول الحركة
-      else if (j === "مسؤول الحركة" || j === "سائق") {
-        addSubPerms("schoolProfile", ["view", "allowEdits"]);
-        addSubPerms("specialReports", ["view", "allowEdits", "taskReports"]);
-        addSubPerms("transport", ["dashboardTab", "configTab", "supervisorCheckTab", "trafficManagerTab"]);
-      }
-      // Default fallback for any other jobs
-      else {
-        addSubPerms("dashboard", ["view"]);
-      }
+    setSelectAll(!!newPerms.all);
+    setFormData({
+      ...formData,
+      jobTitle: jobTitleStr,
+      role: nextRole,
+      permissions: {
+        ...newPerms,
+        schoolsAndBranches: sab,
+      },
+      schools: newSchools,
+      grades: newGrades,
+      sections: newSections,
     });
-
-    if (isImport && !isSuperAdmin) {
-      newPerms.all = false;
-      newPerms.specialCodes = ["hideButton"];
-      newPerms.userManagement = ["disable"];
-    }
-
-    return newPerms;
   };
 
   const handleImportExcel = (e: React.ChangeEvent<HTMLInputElement>) => {
@@ -2398,263 +2341,470 @@ End Sub`;
                   />
                 </div>
 
-                <div className="space-y-2">
-                  <label className="text-sm font-black text-slate-500 mr-2">
-                    الوظيفة (يمكن اختيار أكثر من صفة)
-                  </label>
-                  <div className="relative group">
-                    <div className="min-h-[58px] px-6 py-4 bg-slate-50 border-2 border-transparent focus:border-blue-500 rounded-2xl outline-none font-black text-lg transition-all cursor-pointer flex flex-wrap gap-2 items-center">
-                      {formData.jobTitle ? formData.jobTitle.split(",").map(j => j.trim()).filter(Boolean).join("، ") : "اختر..."}
-                    </div>
-                    <div className="absolute top-full right-0 mt-1 w-full max-h-64 overflow-y-auto bg-white border border-slate-200 rounded-2xl shadow-xl hidden group-hover:block z-50 p-2 custom-scrollbar">
-                      <div className="grid grid-cols-2 gap-1 mt-1">
-                        {[
-                          "المشرف العام", "نائب المشرف العام",
-                          "مدير عام", "مدير فرع", "الإدارة المالية", "المحاسب", "أمين صندوق", "وكيل إداري", 
-                          "وكيل أكاديمي", "مدير الموارد البشرية", "إدارة الجودة", "مدير العلاقات", "المشرف التربوي",
-                          "المشرف الأكاديمي", "المشرف الإداري", "السكرتارية", "المختص الاجتماعي", "مسؤول معمل العلوم",
-                          "مسؤول الوسائل", "مسؤول المكتبة", "مسؤول الأنشطة", "معلم فنية", "معلم الرياضة", "معلم مادة",
-                          "مربية", "مسؤول الحركة", "الحراسة", "مهندس البيئة", "مسؤول المقصف"
-                        ].map((job) => {
-                          const currentJobs = formData.jobTitle ? formData.jobTitle.split(",").map(j => j.trim()).filter(Boolean) : [];
-                          const isSelected = currentJobs.includes(job);
-                          return (
-                            <label
-                              key={job}
-                              className="flex items-center gap-3 p-3 hover:bg-slate-50 cursor-pointer text-sm font-bold rounded-xl transition-colors"
-                            >
+                <div ref={dropdownsWrapperRef} className="space-y-4">
+                  {/* حقل الوظيفة */}
+                  <div className="space-y-2 relative">
+                    <label className="text-sm font-black text-slate-500 mr-2">
+                      الوظيفة (يمكن اختيار أكثر من صفة)
+                    </label>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setDropdownSearch("");
+                        setOpenDropdown(openDropdown === "job" ? null : "job");
+                      }}
+                      className={`w-full min-h-[58px] px-6 py-4 bg-slate-50 border-2 ${
+                        openDropdown === "job"
+                          ? "border-blue-500 bg-white shadow-md"
+                          : "border-transparent hover:border-blue-200"
+                      } rounded-2xl outline-none font-black text-lg transition-all cursor-pointer flex items-center justify-between gap-2 text-right`}
+                    >
+                      <span className="flex-1 truncate">
+                        {formData.jobTitle
+                          ? formData.jobTitle
+                              .split(",")
+                              .map((j) => j.trim())
+                              .filter(Boolean)
+                              .join("، ")
+                          : "اختر الصفة / الوظيفة..."}
+                      </span>
+                      <ChevronDown
+                        size={20}
+                        className={`text-slate-400 transition-transform duration-200 flex-shrink-0 ${
+                          openDropdown === "job" ? "rotate-180 text-blue-600" : ""
+                        }`}
+                      />
+                    </button>
+
+                    {openDropdown === "job" && (
+                      <div className="absolute top-full right-0 mt-1 w-full bg-white border-2 border-blue-100 rounded-2xl shadow-2xl z-50 p-3 flex flex-col gap-2">
+                        <input
+                          type="text"
+                          placeholder="بحث في الوظائف..."
+                          value={dropdownSearch}
+                          onChange={(e) => setDropdownSearch(e.target.value)}
+                          className="w-full px-3 py-2 bg-slate-50 border border-slate-200 rounded-xl outline-none text-xs font-bold"
+                        />
+                        <div className="flex items-center justify-between px-2 py-1 border-b border-slate-100 text-xs font-bold">
+                          <button
+                            type="button"
+                            onClick={() => {
+                              const currentJobs = formData.jobTitle
+                                ? formData.jobTitle
+                                    .split(",")
+                                    .map((j) => j.trim())
+                                    .filter(Boolean)
+                                : [];
+                              if (currentJobs.length === jobsOptions.length) {
+                                applyJobsSelection([]);
+                              } else {
+                                applyJobsSelection([...jobsOptions]);
+                              }
+                            }}
+                            className="text-blue-600 hover:underline font-black"
+                          >
+                            {(formData.jobTitle
+                              ? formData.jobTitle
+                                  .split(",")
+                                  .map((j) => j.trim())
+                                  .filter(Boolean).length
+                              : 0) === jobsOptions.length
+                              ? "إلغاء تحديد الكل"
+                              : "تحديد الكل"}
+                          </button>
+                          <span className="text-slate-400">
+                            المحدد:{" "}
+                            {
+                              (formData.jobTitle
+                                ? formData.jobTitle
+                                    .split(",")
+                                    .map((j) => j.trim())
+                                    .filter(Boolean)
+                                : []
+                              ).length
+                            }
+                          </span>
+                        </div>
+                        <div className="max-h-60 overflow-y-auto custom-scrollbar grid grid-cols-2 gap-1 p-1">
+                          {jobsOptions
+                            .filter((job) =>
+                              job
+                                .toLowerCase()
+                                .includes(dropdownSearch.toLowerCase())
+                            )
+                            .map((job) => {
+                              const currentJobs = formData.jobTitle
+                                ? formData.jobTitle
+                                    .split(",")
+                                    .map((j) => j.trim())
+                                    .filter(Boolean)
+                                : [];
+                              const isSelected = currentJobs.includes(job);
+                              return (
+                                <label
+                                  key={job}
+                                  className={`flex items-center gap-2.5 p-2.5 rounded-xl cursor-pointer text-sm font-bold transition-colors ${
+                                    isSelected
+                                      ? "bg-blue-50 text-blue-700"
+                                      : "hover:bg-slate-50 text-slate-700"
+                                  }`}
+                                >
+                                  <input
+                                    type="checkbox"
+                                    checked={isSelected}
+                                    onChange={(e) => {
+                                      let newJobs = [...currentJobs];
+                                      if (e.target.checked) {
+                                        newJobs.push(job);
+                                      } else {
+                                        newJobs = newJobs.filter((j) => j !== job);
+                                      }
+                                      applyJobsSelection(newJobs);
+                                    }}
+                                    className="rounded border-slate-300 text-blue-600 w-4 h-4 cursor-pointer"
+                                  />
+                                  <span className="truncate">{job}</span>
+                                </label>
+                              );
+                            })}
+                        </div>
+                        <div className="border-t border-slate-100 pt-2 flex justify-end">
+                          <button
+                            type="button"
+                            onClick={() => setOpenDropdown(null)}
+                            className="px-6 py-1.5 bg-blue-600 hover:bg-blue-700 text-white rounded-xl text-xs font-black transition-all"
+                          >
+                            تم
+                          </button>
+                        </div>
+                      </div>
+                    )}
+                  </div>
+
+                  {/* حقل المادة */}
+                  {formData.jobTitle &&
+                    (formData.jobTitle
+                      .split(",")
+                      .map((j) => j.trim())
+                      .includes("معلم مادة") ||
+                      formData.jobTitle
+                        .split(",")
+                        .map((j) => j.trim())
+                        .includes("مربية") ||
+                      formData.jobTitle
+                        .split(",")
+                        .map((j) => j.trim())
+                        .includes("المشرف التربوي")) && (
+                      <div className="space-y-2 relative">
+                        <label className="text-sm font-black text-slate-500 mr-2">
+                          المادة
+                        </label>
+                        <button
+                          type="button"
+                          onClick={() => {
+                            setDropdownSearch("");
+                            setOpenDropdown(
+                              openDropdown === "subjects" ? null : "subjects"
+                            );
+                          }}
+                          className={`w-full min-h-[58px] px-6 py-4 bg-slate-50 border-2 ${
+                            openDropdown === "subjects"
+                              ? "border-blue-500 bg-white shadow-md"
+                              : "border-transparent hover:border-blue-200"
+                          } rounded-2xl outline-none font-black text-lg transition-all cursor-pointer flex items-center justify-between gap-2 text-right`}
+                        >
+                          <span className="flex-1 truncate">
+                            {formData.subjects && formData.subjects.length > 0
+                              ? formData.subjects.length ===
+                                subjectsOptions.length
+                                ? "الجميع"
+                                : formData.subjects.join("، ")
+                              : "اختر المادة..."}
+                          </span>
+                          <ChevronDown
+                            size={20}
+                            className={`text-slate-400 transition-transform duration-200 flex-shrink-0 ${
+                              openDropdown === "subjects"
+                                ? "rotate-180 text-blue-600"
+                                : ""
+                            }`}
+                          />
+                        </button>
+
+                        {openDropdown === "subjects" && (
+                          <div className="absolute top-full right-0 mt-1 w-full bg-white border-2 border-blue-100 rounded-2xl shadow-2xl z-50 p-3 flex flex-col gap-2">
+                            <label className="flex items-center gap-3 p-2.5 hover:bg-slate-50 cursor-pointer text-sm font-black border-b border-slate-100 rounded-xl transition-colors text-blue-600">
                               <input
                                 type="checkbox"
-                                checked={isSelected}
-                                onChange={(e) => {
-                                  let newJobs = [...currentJobs];
-                                  if (e.target.checked) {
-                                    newJobs.push(job);
-                                  } else {
-                                    newJobs = newJobs.filter(j => j !== job);
-                                  }
-                                  const jobTitleStr = newJobs.join(", ");
-                                  
-                                  let newGrades = formData.grades;
-                                  let newSections = formData.sections;
-                                  let nextRole = formData.role;
-
-                                  const isSuperAdminJob = newJobs.includes("المشرف العام") || newJobs.includes("نائب المشرف العام");
-                                  const isMgmtJob = newJobs.some(j => ["مدير عام", "مدير فرع", "مدير عام المدارس", "السكرتارية"].includes(j));
-
-                                  if (isSuperAdminJob || isMgmtJob) {
-                                    newGrades = [...gradesOptions];
-                                    newSections = [...sectionsOptions];
-                                  }
-
-                                  if (isSuperAdminJob) {
-                                    nextRole = "admin";
-                                  }
-
-                                  const newPerms = getPermissionsForJobs(newJobs, formData.permissions || {}, false);
-
+                                checked={
+                                  formData.subjects?.length ===
+                                  subjectsOptions.length
+                                }
+                                onChange={(e) =>
                                   setFormData({
                                     ...formData,
-                                    jobTitle: jobTitleStr,
-                                    role: nextRole,
-                                    permissions: newPerms,
-                                    grades: newGrades,
-                                    sections: newSections,
-                                  });
-                                }}
-                                className="rounded border-slate-300 text-blue-500 w-4 h-4 cursor-pointer"
+                                    subjects: e.target.checked
+                                      ? [...subjectsOptions]
+                                      : [],
+                                  })
+                                }
+                                className="rounded border-slate-300 text-blue-600 w-4 h-4 cursor-pointer"
                               />
-                              {job}
+                              الجميع
                             </label>
-                          );
-                        })}
+                            <div className="max-h-56 overflow-y-auto custom-scrollbar grid grid-cols-2 gap-1 p-1">
+                              {subjectsOptions.map((subj) => {
+                                const isChecked =
+                                  formData.subjects?.includes(subj) || false;
+                                return (
+                                  <label
+                                    key={subj}
+                                    className={`flex items-center gap-2.5 p-2.5 rounded-xl cursor-pointer text-sm font-bold transition-colors ${
+                                      isChecked
+                                        ? "bg-blue-50 text-blue-700"
+                                        : "hover:bg-slate-50 text-slate-700"
+                                    }`}
+                                  >
+                                    <input
+                                      type="checkbox"
+                                      checked={isChecked}
+                                      onChange={() => {
+                                        const newArr = isChecked
+                                          ? (formData.subjects || []).filter(
+                                              (x) => x !== subj
+                                            )
+                                          : [...(formData.subjects || []), subj];
+                                        setFormData({
+                                          ...formData,
+                                          subjects: newArr,
+                                        });
+                                      }}
+                                      className="rounded border-slate-300 text-blue-600 w-4 h-4 cursor-pointer"
+                                    />
+                                    <span className="truncate">{subj}</span>
+                                  </label>
+                                );
+                              })}
+                            </div>
+                            <div className="border-t border-slate-100 pt-2 flex justify-end">
+                              <button
+                                type="button"
+                                onClick={() => setOpenDropdown(null)}
+                                className="px-6 py-1.5 bg-blue-600 hover:bg-blue-700 text-white rounded-xl text-xs font-black transition-all"
+                              >
+                                تم
+                              </button>
+                            </div>
+                          </div>
+                        )}
                       </div>
-                    </div>
-                  </div>
-                </div>
+                    )}
 
-                {formData.jobTitle && (
-                  formData.jobTitle.split(",").map(j => j.trim()).includes("معلم مادة") ||
-                  formData.jobTitle.split(",").map(j => j.trim()).includes("مربية") ||
-                  formData.jobTitle.split(",").map(j => j.trim()).includes("المشرف التربوي")
-                ) && (
-                  <div className="space-y-2">
+                  {/* حقل الصف */}
+                  <div className="space-y-2 relative">
                     <label className="text-sm font-black text-slate-500 mr-2">
-                      المادة
+                      الصف
                     </label>
-                    <div className="relative group">
-                      <div className="min-h-[58px] px-6 py-4 bg-slate-50 border-2 border-transparent focus:border-blue-500 rounded-2xl outline-none font-black text-lg transition-all cursor-pointer flex flex-wrap gap-2 items-center">
-                        {formData.subjects && formData.subjects.length > 0
-                          ? formData.subjects.join("، ")
-                          : "اختر المادة..."}
-                      </div>
-                      <div className="absolute top-full right-0 mt-1 w-full max-h-48 overflow-y-auto bg-white border border-slate-200 rounded-2xl shadow-xl hidden group-hover:block z-50 p-2 custom-scrollbar">
-                        <label className="flex items-center gap-3 p-3 hover:bg-slate-50 cursor-pointer text-sm font-bold border-b rounded-xl transition-colors">
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setDropdownSearch("");
+                        setOpenDropdown(
+                          openDropdown === "grades" ? null : "grades"
+                        );
+                      }}
+                      className={`w-full min-h-[58px] px-6 py-4 bg-slate-50 border-2 ${
+                        openDropdown === "grades"
+                          ? "border-blue-500 bg-white shadow-md"
+                          : "border-transparent hover:border-blue-200"
+                      } rounded-2xl outline-none font-black text-lg transition-all cursor-pointer flex items-center justify-between gap-2 text-right`}
+                    >
+                      <span className="flex-1 truncate">
+                        {formData.grades && formData.grades.length > 0
+                          ? formData.grades.length === gradesOptions.length
+                            ? "الجميع"
+                            : formData.grades.join("، ")
+                          : "اختر الصف..."}
+                      </span>
+                      <ChevronDown
+                        size={20}
+                        className={`text-slate-400 transition-transform duration-200 flex-shrink-0 ${
+                          openDropdown === "grades"
+                            ? "rotate-180 text-blue-600"
+                            : ""
+                        }`}
+                      />
+                    </button>
+
+                    {openDropdown === "grades" && (
+                      <div className="absolute top-full right-0 mt-1 w-full bg-white border-2 border-blue-100 rounded-2xl shadow-2xl z-50 p-3 flex flex-col gap-2">
+                        <label className="flex items-center gap-3 p-2.5 hover:bg-slate-50 cursor-pointer text-sm font-black border-b border-slate-100 rounded-xl transition-colors text-blue-600">
                           <input
                             type="checkbox"
                             checked={
-                              formData.subjects?.length === [
-                                "مربية", "القرآن الكريم", "التربية الإسلامية", "اللغة العربية", "اللغة الإنجليزية", 
-                                "الرياضيات", "العلوم", "الكيمياء", "الفيزياء", "الأحياء", "الاجتماعيات", "الحاسوب",
-                                "الإرشاد", "المهارات الحياتية"
-                              ].length
+                              formData.grades?.length === gradesOptions.length
                             }
                             onChange={(e) =>
                               setFormData({
                                 ...formData,
-                                subjects: e.target.checked
-                                  ? [
-                                      "مربية", "القرآن الكريم", "التربية الإسلامية", "اللغة العربية", "اللغة الإنجليزية", 
-                                      "الرياضيات", "العلوم", "الكيمياء", "الفيزياء", "الأحياء", "الاجتماعيات", "الحاسوب",
-                                      "الإرشاد", "المهارات الحياتية"
-                                    ]
+                                grades: e.target.checked
+                                  ? [...gradesOptions]
                                   : [],
                               })
                             }
-                            className="rounded border-slate-300 text-blue-500 w-4 h-4 cursor-pointer"
+                            className="rounded border-slate-300 text-blue-600 w-4 h-4 cursor-pointer"
                           />
                           الجميع
                         </label>
-                        <div className="grid grid-cols-2 gap-1 mt-1">
-                          {[
-                            "مربية", "القرآن الكريم", "التربية الإسلامية", "اللغة العربية", "اللغة الإنجليزية", 
-                            "الرياضيات", "العلوم", "الكيمياء", "الفيزياء", "الأحياء", "الاجتماعيات", "الحاسوب",
-                            "الإرشاد", "المهارات الحياتية"
-                          ].map((subj) => {
-                            const isChecked = formData.subjects?.includes(subj) || false;
+                        <div className="max-h-56 overflow-y-auto custom-scrollbar grid grid-cols-2 gap-1 p-1">
+                          {gradesOptions.map((gr, i) => {
+                            const isChecked =
+                              formData.grades?.includes(gr) || false;
                             return (
                               <label
-                                key={subj}
-                                className="flex items-center gap-3 p-3 hover:bg-slate-50 cursor-pointer text-sm font-bold rounded-xl transition-colors"
+                                key={`grade-${gr}-${i}`}
+                                className={`flex items-center gap-2.5 p-2.5 rounded-xl cursor-pointer text-sm font-bold transition-colors ${
+                                  isChecked
+                                    ? "bg-blue-50 text-blue-700"
+                                    : "hover:bg-slate-50 text-slate-700"
+                                }`}
                               >
                                 <input
                                   type="checkbox"
                                   checked={isChecked}
                                   onChange={() => {
                                     const newArr = isChecked
-                                      ? (formData.subjects || []).filter((x) => x !== subj)
-                                      : [...(formData.subjects || []), subj];
-                                    setFormData({ ...formData, subjects: newArr });
+                                      ? (formData.grades || []).filter(
+                                          (x) => x !== gr
+                                        )
+                                      : [...(formData.grades || []), gr];
+                                    setFormData({
+                                      ...formData,
+                                      grades: newArr,
+                                    });
                                   }}
-                                  className="rounded border-slate-300 text-blue-500 w-4 h-4 cursor-pointer"
+                                  className="rounded border-slate-300 text-blue-600 w-4 h-4 cursor-pointer"
                                 />
-                                {subj}
+                                <span>{gr}</span>
                               </label>
                             );
                           })}
                         </div>
-                      </div>
-                    </div>
-                  </div>
-                )}
-
-                <div className="space-y-2">
-                  <label className="text-sm font-black text-slate-500 mr-2">
-                    الصف
-                  </label>
-                  <div className="relative group">
-                    <div className="min-h-[58px] px-6 py-4 bg-slate-50 border-2 border-transparent focus:border-blue-500 rounded-2xl outline-none font-black text-lg transition-all cursor-pointer flex flex-wrap gap-2 items-center">
-                      {formData.grades?.length === gradesOptions.length
-                        ? "الجميع"
-                        : formData.grades?.join("، ") || "اختر..."}
-                    </div>
-                    <div className="absolute top-full right-0 mt-1 w-full max-h-48 overflow-y-auto bg-white border border-slate-200 rounded-2xl shadow-xl hidden group-hover:block z-50 p-2">
-                      <label className="flex items-center gap-3 p-3 hover:bg-slate-50 cursor-pointer text-sm font-bold border-b rounded-xl transition-colors">
-                        <input
-                          type="checkbox"
-                          checked={
-                            formData.grades?.length === gradesOptions.length
-                          }
-                          onChange={(e) =>
-                            setFormData({
-                              ...formData,
-                              grades: e.target.checked
-                                ? [...gradesOptions]
-                                : [],
-                            })
-                          }
-                          className="rounded border-slate-300 text-blue-500 w-4 h-4 cursor-pointer"
-                        />
-                        الجميع
-                      </label>
-                      <div className="grid grid-cols-2 gap-1 mt-1">
-                        {gradesOptions.map((gr, i) => (
-                          <label
-                            key={`grade-${gr}-${i}`}
-                            className="flex items-center gap-3 p-3 hover:bg-slate-50 cursor-pointer text-sm font-bold rounded-xl transition-colors"
+                        <div className="border-t border-slate-100 pt-2 flex justify-end">
+                          <button
+                            type="button"
+                            onClick={() => setOpenDropdown(null)}
+                            className="px-6 py-1.5 bg-blue-600 hover:bg-blue-700 text-white rounded-xl text-xs font-black transition-all"
                           >
-                            <input
-                              type="checkbox"
-                              checked={formData.grades?.includes(gr) || false}
-                              onChange={() => {
-                                const newArr = formData.grades?.includes(gr)
-                                  ? formData.grades.filter((x) => x !== gr)
-                                  : [...(formData.grades || []), gr];
-                                setFormData({ ...formData, grades: newArr });
-                              }}
-                              className="rounded border-slate-300 text-blue-500 w-4 h-4 cursor-pointer"
-                            />
-                            {gr}
-                          </label>
-                        ))}
+                            تم
+                          </button>
+                        </div>
                       </div>
-                    </div>
+                    )}
                   </div>
-                </div>
 
-                <div className="space-y-2">
-                  <label className="text-sm font-black text-slate-500 mr-2">
-                    الشعب
-                  </label>
-                  <div className="relative group">
-                    <div className="min-h-[58px] px-6 py-4 bg-slate-50 border-2 border-transparent focus:border-blue-500 rounded-2xl outline-none font-black text-lg transition-all cursor-pointer flex flex-wrap gap-2 items-center">
-                      {formData.sections?.length === sectionsOptions.length
-                        ? "الجميع"
-                        : formData.sections?.join("، ") || "اختر..."}
-                    </div>
-                    <div className="absolute top-full right-0 mt-1 w-full max-h-48 overflow-y-auto bg-white border border-slate-200 rounded-2xl shadow-xl hidden group-hover:block z-50 p-2">
-                      <label className="flex items-center gap-3 p-3 hover:bg-slate-50 cursor-pointer text-sm font-bold border-b rounded-xl transition-colors">
-                        <input
-                          type="checkbox"
-                          checked={
-                            formData.sections?.length === sectionsOptions.length
-                          }
-                          onChange={(e) =>
-                            setFormData({
-                              ...formData,
-                              sections: e.target.checked
-                                ? [...sectionsOptions]
-                                : [],
-                            })
-                          }
-                          className="rounded border-slate-300 text-blue-500 w-4 h-4 cursor-pointer"
-                        />
-                        الجميع
-                      </label>
-                      <div className="grid grid-cols-2 gap-1 mt-1">
-                        {sectionsOptions.map((sec, i) => (
-                          <label
-                            key={`section-${sec}-${i}`}
-                            className="flex items-center gap-3 p-3 hover:bg-slate-50 cursor-pointer text-sm font-bold rounded-xl transition-colors"
+                  {/* حقل الشعب */}
+                  <div className="space-y-2 relative">
+                    <label className="text-sm font-black text-slate-500 mr-2">
+                      الشعب
+                    </label>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setDropdownSearch("");
+                        setOpenDropdown(
+                          openDropdown === "sections" ? null : "sections"
+                        );
+                      }}
+                      className={`w-full min-h-[58px] px-6 py-4 bg-slate-50 border-2 ${
+                        openDropdown === "sections"
+                          ? "border-blue-500 bg-white shadow-md"
+                          : "border-transparent hover:border-blue-200"
+                      } rounded-2xl outline-none font-black text-lg transition-all cursor-pointer flex items-center justify-between gap-2 text-right`}
+                    >
+                      <span className="flex-1 truncate">
+                        {formData.sections && formData.sections.length > 0
+                          ? formData.sections.length === sectionsOptions.length
+                            ? "الجميع"
+                            : formData.sections.join("، ")
+                          : "اختر الشعبة..."}
+                      </span>
+                      <ChevronDown
+                        size={20}
+                        className={`text-slate-400 transition-transform duration-200 flex-shrink-0 ${
+                          openDropdown === "sections"
+                            ? "rotate-180 text-blue-600"
+                            : ""
+                        }`}
+                      />
+                    </button>
+
+                    {openDropdown === "sections" && (
+                      <div className="absolute top-full right-0 mt-1 w-full bg-white border-2 border-blue-100 rounded-2xl shadow-2xl z-50 p-3 flex flex-col gap-2">
+                        <label className="flex items-center gap-3 p-2.5 hover:bg-slate-50 cursor-pointer text-sm font-black border-b border-slate-100 rounded-xl transition-colors text-blue-600">
+                          <input
+                            type="checkbox"
+                            checked={
+                              formData.sections?.length ===
+                              sectionsOptions.length
+                            }
+                            onChange={(e) =>
+                              setFormData({
+                                ...formData,
+                                sections: e.target.checked
+                                  ? [...sectionsOptions]
+                                  : [],
+                              })
+                            }
+                            className="rounded border-slate-300 text-blue-600 w-4 h-4 cursor-pointer"
+                          />
+                          الجميع
+                        </label>
+                        <div className="max-h-56 overflow-y-auto custom-scrollbar grid grid-cols-2 gap-1 p-1">
+                          {sectionsOptions.map((sec, i) => {
+                            const isChecked =
+                              formData.sections?.includes(sec) || false;
+                            return (
+                              <label
+                                key={`section-${sec}-${i}`}
+                                className={`flex items-center gap-2.5 p-2.5 rounded-xl cursor-pointer text-sm font-bold transition-colors ${
+                                  isChecked
+                                    ? "bg-blue-50 text-blue-700"
+                                    : "hover:bg-slate-50 text-slate-700"
+                                }`}
+                              >
+                                <input
+                                  type="checkbox"
+                                  checked={isChecked}
+                                  onChange={() => {
+                                    const newArr = isChecked
+                                      ? (formData.sections || []).filter(
+                                          (x) => x !== sec
+                                        )
+                                      : [...(formData.sections || []), sec];
+                                    setFormData({
+                                      ...formData,
+                                      sections: newArr,
+                                    });
+                                  }}
+                                  className="rounded border-slate-300 text-blue-600 w-4 h-4 cursor-pointer"
+                                />
+                                <span>{sec}</span>
+                              </label>
+                            );
+                          })}
+                        </div>
+                        <div className="border-t border-slate-100 pt-2 flex justify-end">
+                          <button
+                            type="button"
+                            onClick={() => setOpenDropdown(null)}
+                            className="px-6 py-1.5 bg-blue-600 hover:bg-blue-700 text-white rounded-xl text-xs font-black transition-all"
                           >
-                            <input
-                              type="checkbox"
-                              checked={
-                                formData.sections?.includes(sec) || false
-                              }
-                              onChange={() => {
-                                const newArr = formData.sections?.includes(sec)
-                                  ? formData.sections.filter((x) => x !== sec)
-                                  : [...(formData.sections || []), sec];
-                                setFormData({ ...formData, sections: newArr });
-                              }}
-                              className="rounded border-slate-300 text-blue-500 w-4 h-4 cursor-pointer"
-                            />
-                            {sec}
-                          </label>
-                        ))}
+                            تم
+                          </button>
+                        </div>
                       </div>
-                    </div>
+                    )}
                   </div>
                 </div>
 

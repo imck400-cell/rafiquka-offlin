@@ -1009,9 +1009,7 @@ const AccessCodesModal: React.FC<AccessCodesModalProps> = ({
         const isSecOrQuality = selectedValues.some(j => ["السكرتارية", "إدارة الجودة", "الجودة"].includes(j));
 
         if (isSuperAdminJob || isMgmtJob || isSecOrQuality) {
-          if (isSuperAdminJob || isMgmtJob) {
-            updatedUser.role = "admin";
-          }
+          updatedUser.role = (isSuperAdminJob || isMgmtJob) ? "admin" : "user";
           updatedUser.grades = [...gradesOptions];
           updatedUser.sections = [...sectionsOptions];
           updatedUser.schools = (data.availableSchools || []).filter(Boolean);
@@ -1027,11 +1025,9 @@ const AccessCodesModal: React.FC<AccessCodesModalProps> = ({
             schoolsAndBranches: sab,
           };
         } else {
+          updatedUser.role = "user";
           const newPerms = getPermissionsForJobs(selectedValues, updatedUser.permissions || {}, false);
-          updatedUser.permissions = {
-            ...(updatedUser.permissions || {}),
-            ...newPerms,
-          };
+          updatedUser.permissions = newPerms;
         }
       } else if (field === 'subjects') {
         updatedUser.subjects = selectedValues;
@@ -1088,9 +1084,7 @@ const AccessCodesModal: React.FC<AccessCodesModalProps> = ({
         const isSecOrQuality = selectedValues.some(j => ["السكرتارية", "إدارة الجودة", "الجودة"].includes(j));
 
         if (isSuperAdminJob || isMgmtJob || isSecOrQuality) {
-          if (isSuperAdminJob || isMgmtJob) {
-            updatedUser.role = "admin";
-          }
+          updatedUser.role = (isSuperAdminJob || isMgmtJob) ? "admin" : "user";
           updatedUser.grades = [...gradesOptions];
           updatedUser.sections = [...sectionsOptions];
           updatedUser.schools = (data.availableSchools || []).filter(Boolean);
@@ -1106,11 +1100,9 @@ const AccessCodesModal: React.FC<AccessCodesModalProps> = ({
             schoolsAndBranches: sab,
           };
         } else {
+          updatedUser.role = "user";
           const newPerms = getPermissionsForJobs(selectedValues, updatedUser.permissions || {}, false);
-          updatedUser.permissions = {
-            ...(updatedUser.permissions || {}),
-            ...newPerms,
-          };
+          updatedUser.permissions = newPerms;
         }
       } else if (field === 'subjects') {
         updatedUser.subjects = selectedValues;
@@ -1578,6 +1570,10 @@ const AccessCodesModal: React.FC<AccessCodesModalProps> = ({
       id: generateId(),
       name: "",
       code: "",
+      jobTitle: "",
+      subjects: [],
+      grades: [],
+      sections: [],
       schools: [],
       academicYears: [],
       startDate: new Date().toISOString().split("T")[0],
@@ -1597,6 +1593,10 @@ const AccessCodesModal: React.FC<AccessCodesModalProps> = ({
       id: generateId(),
       name: "",
       code: "",
+      jobTitle: "",
+      subjects: [],
+      grades: [],
+      sections: [],
       schools: [],
       academicYears: [],
       startDate: new Date().toISOString().split("T")[0],
