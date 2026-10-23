@@ -26,13 +26,14 @@ jobs:
           distribution: 'zulu'
           java-version: '17'
 
-      - name: Setup Android SDK
-        uses: android-actions/setup-android@v3
+      - name: Accept Android SDK Licenses
+        run: |
+          yes | $ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager --licenses || true
 
       - name: Install Dependencies
         run: npm install --legacy-peer-deps
 
-      - name: Build Web Production Assets
+      - name: Build Web App
         run: npm run build
 
       - name: Sync Capacitor Android
@@ -53,7 +54,7 @@ jobs:
             ./gradlew :app:assembleDebug --stacktrace
           fi
 
-      - name: Upload APK Artifact
+      - name: Upload APK
         uses: actions/upload-artifact@v4
         with:
           name: rafiquk-school-app
