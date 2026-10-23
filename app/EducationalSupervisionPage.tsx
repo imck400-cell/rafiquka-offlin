@@ -6,6 +6,12 @@ import {
   ChevronDown, ArrowRight, FileText, BookOpen, UserCircle, ListChecks, Trash2, Share2, Download, Search, Filter, RefreshCw
 } from 'lucide-react';
 import { formatEvaluationToWhatsApp, matchSubjects, isSameSchool, normalizeSchoolName } from './evaluationUtils';
+import {
+  normalizeArabicText,
+  normalizeBranch,
+  hasIntersection,
+  isEntityVisibleToSupervisor,
+} from '../src/lib/NormalizationEngine';
 import { ShortEvaluationForm } from './ShortEvaluationForm';
 import { ExtEvaluationForm } from './ExtEvaluationForm';
 import FinalReportsPage from './FinalReportsPage';
@@ -376,71 +382,36 @@ export default function EducationalSupervisionPage({ initialTab = '' }: { initia
     const seenIds = new Set<string>();
     const seenNames = new Set<string>();
 
-    // 1. معالجة موظفي الأمانة مع مرونة المسمى الوظيفي والحفاظ التام على محرك الصلاحيات
-    (data.secretariatStaff || []).forEach(s => {
-      if (!s.school || !isSameSchool(s.school, selectedSchool)) return;
-      
-      const titles = Array.isArray(s.jobTitles) ? s.jobTitles : (s.jobTitle ? [s.jobTitle] : []);
-      const isTeachingStaff = titles.some((t: string) => 
-        t.includes('معلم') || t.includes('مربي') || t.includes('مربية') || t.includes('أستاذ') || t.includes('تدريس')
-      ) || (s.subjects && s.subjects.length > 0);
-      if (!isTeachingStaff) return;
+    // 1. تصفية كادر المعلمين (secretariatStaff) عبر محرك التطبيع والعزل الصارم (NormalizationEngine)
+    (data.secretariatStaff || []).forEach((s) => {
+      if (!s || !s.school || !isSameSchool(s.school, selectedSchool)) return;
+      if (selectedBranch && s.branch && !hasIntersection([s.branch], [selectedBranch], normalizeBranch)) return;
 
-      if (selectedBranch && s.branch && s.branch !== selectedBranch) return;
-
-      // محرك صلاحيات المشرف المقيد (Branch, Grade, Subject)
-      if (!isSuperAdmin) {
-        const supervisorBranches = currentUser?.permissions?.schoolsAndBranches?.[selectedSchool] || [];
-        if (supervisorBranches.length > 0 && s.branch && !supervisorBranches.includes(s.branch)) return;
-
-        const supervisorGrades = currentUser?.grades || [];
-        if (supervisorGrades.length > 0) {
-          const teacherGrades = s.grades || [];
-          if (!teacherGrades.some((g: string) => supervisorGrades.includes(g))) return;
-        }
-
-        const supervisorSubjects = currentUser?.subjects || [];
-        if (supervisorSubjects.length > 0) {
-          const teacherSubjects = s.subjects || [];
-          if (!teacherSubjects.some((sub: string) => supervisorSubjects.includes(sub) || supervisorSubjects.some((ss: string) => matchSubjects(ss, sub)))) return;
-        }
-      }
+      // فحص ظهور المعلم للمشرف الحالي (استبعاد الإداريين + اشتراط المواد وتقاطع المدرسة والفرع والصف والمادة والشعبة)
+      if (!isEntityVisibleToSupervisor(s, currentUser, 'secretariatStaff')) return;
 
       const item = {
         ...s,
-        jobTitle: Array.isArray(s.jobTitles) ? s.jobTitles.join('، ') : (s.jobTitle || 'معلم مادة')
+        jobTitle: Array.isArray(s.jobTitles) ? s.jobTitles.join('، ') : (s.jobTitle || 'معلم مادة'),
       };
       if (item.id) seenIds.add(item.id);
-      if (item.name) seenNames.add(item.name.trim());
+      if (item.name) seenNames.add(normalizeArabicText(item.name));
       list.push(item);
     });
 
-    // 2. إدراج المعلمين ذوي الزيارات السابقة المقيدين حصراً بالمدرسة النشطة وبنطاق صلاحيات المشرف
+    // 2. إدراج المعلمين ذوي الزيارات السابقة المقيدين حصراً بالمدرسة النشطة وبنطاق صلاحيات المشرف عبر isEntityVisibleToSupervisor
     (data.teacherEvaluations || []).forEach((ev: any) => {
       if (!ev || !ev.school || !isSameSchool(ev.school, selectedSchool)) return;
-      if (selectedBranch && ev.branch && ev.branch !== selectedBranch) return;
+      if (selectedBranch && ev.branch && !hasIntersection([ev.branch], [selectedBranch], normalizeBranch)) return;
 
-      // تطبيق محرك الصلاحيات الكامل على زيارات المعلمين
-      if (!isSuperAdmin) {
-        const supervisorBranches = currentUser?.permissions?.schoolsAndBranches?.[selectedSchool] || [];
-        if (supervisorBranches.length > 0 && ev.branch && !supervisorBranches.includes(ev.branch)) return;
-
-        const supervisorGrades = currentUser?.grades || [];
-        if (supervisorGrades.length > 0 && ev.className) {
-          if (!supervisorGrades.some((g: string) => ev.className.includes(g))) return;
-        }
-
-        const supervisorSubjects = currentUser?.subjects || [];
-        if (supervisorSubjects.length > 0 && ev.subject) {
-          if (!supervisorSubjects.some((sub: string) => matchSubjects(sub, ev.subject))) return;
-        }
-      }
+      if (!isEntityVisibleToSupervisor(ev, currentUser, 'teacherEvaluations')) return;
 
       const tId = ev.teacherId || `teacher_${ev.teacherName || 'unknown'}`;
       const tName = ev.teacherName ? ev.teacherName.trim() : '';
-      if ((tId && seenIds.has(tId)) || (tName && seenNames.has(tName))) return;
+      const normTName = normalizeArabicText(tName);
+      if ((tId && seenIds.has(tId)) || (normTName && seenNames.has(normTName))) return;
       if (tId) seenIds.add(tId);
-      if (tName) seenNames.add(tName);
+      if (normTName) seenNames.add(normTName);
 
       list.push({
         id: tId,
@@ -448,7 +419,7 @@ export default function EducationalSupervisionPage({ initialTab = '' }: { initia
         school: selectedSchool,
         branch: ev.branch || selectedBranch,
         jobTitle: 'معلم مادة',
-        subjects: ev.subject ? [ev.subject] : []
+        subjects: ev.subject ? [ev.subject] : [],
       });
     });
 
@@ -605,28 +576,25 @@ export default function EducationalSupervisionPage({ initialTab = '' }: { initia
                 <TeacherArchiveView
                   evaluations={(data.teacherEvaluations || []).filter(e => {
                     if (!e || !e.school || !isSameSchool(e.school, selectedSchool)) return false;
-                    
-                    // التحقق من صلاحيات المشرف المقيد على الزيارة في الأرشيف
-                    if (!isSuperAdmin) {
-                      const supervisorBranches = currentUser?.permissions?.schoolsAndBranches?.[selectedSchool] || [];
-                      if (supervisorBranches.length > 0 && e.branch && !supervisorBranches.includes(e.branch)) return false;
 
-                      const supervisorGrades = currentUser?.grades || [];
-                      if (supervisorGrades.length > 0 && e.className && !supervisorGrades.some((g: string) => e.className.includes(g))) return false;
-
-                      const supervisorSubjects = currentUser?.subjects || [];
-                      if (supervisorSubjects.length > 0 && e.subject && !supervisorSubjects.some((sub: string) => matchSubjects(sub, e.subject))) return false;
-                    }
+                    // التحقق من صلاحيات المشرف المقيد عبر محرك العزل الصارم
+                    if (!isEntityVisibleToSupervisor(e, currentUser, 'teacherEvaluations')) return false;
 
                     // وضع الأرشيف العام للمدرسة
                     if (selectedTeacherId === 'ALL') {
                       return true;
                     }
 
-                    // وضع أرشيف المعلم المحدد (بالـ ID أو بالاسم)
+                    // وضع أرشيف المعلم المحدد (بالـ ID أو بالاسم بعد التطبيع)
                     if (selectedTeacher?.id && e.teacherId === selectedTeacher.id) return true;
                     if (selectedTeacherId && e.teacherId === selectedTeacherId) return true;
-                    if (selectedTeacher?.name && e.teacherName && e.teacherName.trim() === selectedTeacher.name.trim()) return true;
+                    if (
+                      selectedTeacher?.name &&
+                      e.teacherName &&
+                      normalizeArabicText(e.teacherName) === normalizeArabicText(selectedTeacher.name)
+                    ) {
+                      return true;
+                    }
                     return false;
                   })}
                   onEdit={(ev) => {

@@ -37,17 +37,6 @@ self.addEventListener('fetch', (event) => {
     return; // Don't call event.respondWith() to let browser handle natively
   }
 
-  // Bypass API requests to prevent caching issues, frontend will handle API offline states
-  // Also bypass any requests to the api subdomain directly to prevent CORS/SW issues
-  if (url.pathname.includes('/api/') || url.hostname === 'api.rafiquka.com') {
-    return; // Don't call event.respondWith() to let browser handle natively
-  }
-
-  // Bypass version.json to always hit the server for freshness detection
-  if (url.pathname === '/version.json') {
-    return;
-  }
-
   // Network First for HTML pages to ensure latest version is fetched
   if (event.request.mode === 'navigate') {
     event.respondWith(

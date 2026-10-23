@@ -1,12 +1,22 @@
 {
-  "name": "rafiquk-admin",
-  "version": "1.0.0",
+  "name": "rafiquk-school",
+  "version": "2.0.0",
   "private": true,
   "type": "module",
   "dependencies": {
+    "@capacitor/android": "^6.0.0",
+    "@capacitor/cli": "^6.0.0",
+    "@capacitor/core": "^6.0.0",
+    "@capacitor/filesystem": "^6.0.0",
+    "@capacitor/share": "^6.0.0",
     "@tailwindcss/vite": "^4.2.2",
-    "axios": "^1.16.1",
+    "@types/file-saver": "^2.0.7",
+    "@types/node": "^25.5.0",
+    "@types/react": "^19.0.0",
+    "@types/react-dom": "^19.0.0",
+    "@vitejs/plugin-react": "^4.3.0",
     "clsx": "^2.1.0",
+    "dexie": "^4.0.11",
     "exceljs": "^4.4.0",
     "file-saver": "^2.0.5",
     "framer-motion": "^11.0.0",
@@ -17,22 +27,21 @@
     "sonner": "^2.0.7",
     "tailwind-merge": "^2.2.0",
     "tailwindcss": "^4.2.2",
+    "typescript": "^5.0.0",
+    "vite": "^6.0.0",
     "xlsx": "^0.18.5",
     "xlsx-js-style": "^1.2.0"
   },
   "devDependencies": {
-    "@types/file-saver": "^2.0.7",
-    "@types/node": "^25.5.0",
-    "@types/react": "^19.0.0",
-    "@types/react-dom": "^19.0.0",
-    "@vitejs/plugin-react": "^4.3.0",
-    "typescript": "^5.0.0",
-    "vite": "^6.0.0"
+    "@capacitor/cli": "^6.0.0"
   },
   "scripts": {
     "dev": "vite",
     "build": "vite build && node generate-sw.js",
     "preview": "vite preview",
-    "lint": "tsc --noEmit"
+    "lint": "tsc --noEmit",
+    "android:init": "npm run build && npx cap add android && npx cap sync android",
+    "android:sync": "npm run build && npx cap sync android",
+    "android:open": "npx cap open android"
   }
 }

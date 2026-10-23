@@ -110,44 +110,28 @@ export const extCriteriaBlocks: ScoreBlock[] = [
   }
 ];
 
+import {
+  normalizeSchool,
+  normalizeSubject as engineNormalizeSubject,
+  areSubjectsCompatible,
+  hasIntersection,
+} from '../src/lib/NormalizationEngine';
+
 /**
- * Normalizes a school name or identifier for strict canonical comparison.
- * Zero tolerance for partial matching (includes/indexOf).
- * Strips common prefixes like "مدرسة", "مدارس", "المدرسة", "مجمع" at start of string only,
- * removes all punctuation/brackets, normalizes Arabic hamzas/taa-marbuta, and collapses whitespace.
+ * Normalizes a school name or identifier for strict canonical comparison
+ * using the central Arabic NormalizationEngine.
  */
 export const normalizeSchoolName = (name?: string | null): string => {
-  if (!name) return '';
-  let s = name.trim();
-  // Remove surrounding brackets or quotes
-  s = s.replace(/^[\s"'\[\]\(\)\{\}«»]+|[\s"'\[\]\(\)\{\}«»]+$/g, '');
-  // Normalize Arabic letters: hamzas, alif maqsurah, taa marbuta
-  s = s
-    .replace(/[أإآا]/g, 'ا')
-    .replace(/ة/g, 'ه')
-    .replace(/ى/g, 'ي')
-    .replace(/[ـ\-_.]/g, ' ');
-  // Strip leading institutional prefixes strictly at the start
-  s = s.replace(/^(مدارس|مدرسه|مدرسة|المدرسه|المدرسة|مجمع|روضه|روضة|ثانويه|ثانوية)\s+/i, '');
-  // Collapse whitespace
-  s = s.replace(/\s+/g, ' ').trim();
-  return s;
+  return normalizeSchool(name);
 };
 
 /**
- * Checks if two school identifiers or names refer to the exact same school.
- * Non-negotiable security: Absolutely NO partial/substring matching (no includes/indexOf).
- * Uses exact string equality after canonical normalization.
+ * Checks if two school identifiers or names refer to the exact same school
+ * after canonical Arabic normalization.
  */
 export const isSameSchool = (schoolA?: string | null, schoolB?: string | null): boolean => {
   if (!schoolA || !schoolB) return false;
-  const a = schoolA.trim();
-  const b = schoolB.trim();
-  if (a === b) return true;
-  const normA = normalizeSchoolName(a);
-  const normB = normalizeSchoolName(b);
-  if (!normA || !normB) return false;
-  return normA === normB;
+  return hasIntersection([schoolA], [schoolB], normalizeSchool);
 };
 
 /**
@@ -182,10 +166,7 @@ export const SUBJECT_FAMILY_GROUPS: Record<string, string[]> = {
  * Normalizes subject names across different spelling variations
  */
 export const normalizeSubject = (subj?: string): string => {
-  if (!subj) return '';
-  let s = subj.trim();
-  s = s.replace(/[أإآا]/g, 'ا').replace(/ة/g, 'ه').replace(/ى/g, 'ي').replace(/\s+/g, ' ');
-  return s;
+  return engineNormalizeSubject(subj);
 };
 
 /**
@@ -193,23 +174,7 @@ export const normalizeSubject = (subj?: string): string => {
  */
 export const matchSubjects = (subjA?: string, subjB?: string): boolean => {
   if (!subjA || !subjB) return false;
-  const a = subjA.trim();
-  const b = subjB.trim();
-  if (a === b) return true;
-
-  const normA = normalizeSubject(a);
-  const normB = normalizeSubject(b);
-  if (normA === normB) return true;
-
-  // Check subject family groups
-  for (const group of Object.values(SUBJECT_FAMILY_GROUPS)) {
-    const groupNorm = group.map(normalizeSubject);
-    const hasA = groupNorm.includes(normA);
-    const hasB = groupNorm.includes(normB);
-    if (hasA && hasB) return true;
-  }
-
-  return false;
+  return areSubjectsCompatible(subjA, subjB);
 };
 
 /**

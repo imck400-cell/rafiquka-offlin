@@ -6,41 +6,13 @@
     <meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate" />
     <meta http-equiv="Pragma" content="no-cache" />
     <meta http-equiv="Expires" content="0" />
-    <title>Rafiquk - رفيقك</title>
+    <title>رفيقك المدرسي</title>
     <link rel="manifest" href="/manifest.json" />
     <meta name="apple-mobile-web-app-capable" content="yes" />
     <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
-    <meta name="apple-mobile-web-app-title" content="Rafiquk" />
+    <meta name="apple-mobile-web-app-title" content="رفيقك المدرسي" />
     <link rel="apple-touch-icon" href="/icon-192.png" />
     <link href="https://fonts.googleapis.com/css2?family=Cairo:wght@300;400;600;700&display=swap" rel="stylesheet">
-    <script>
-    (function(){
-      if(location.hostname==='localhost'||location.hostname==='127.0.0.1')return;
-      if(location.search.indexOf('_forceUpdate=')!==-1){
-        history.replaceState(null,'',location.pathname);
-        return;
-      }
-      try{
-        fetch('/version.json?_='+Date.now(),{cache:'no-store'})
-        .then(function(r){return r.ok?r.json():null})
-        .then(function(d){
-          if(!d||!d.v)return;
-          var sv=String(d.v);
-          var lv=localStorage.getItem('app_build_version');
-          if(!lv){localStorage.setItem('app_build_version',sv);return;}
-          if(lv===sv)return;
-          localStorage.setItem('app_build_version',sv);
-          var pq=localStorage.getItem('pending_sync_queue');
-          var q=pq?JSON.parse(pq):[];
-          if(q.length>0){localStorage.setItem('sw_update_ready','true');return;}
-          var go=function(){location.href=location.pathname+'?_forceUpdate='+Date.now();};
-          if(typeof caches!=='undefined'){
-            caches.keys().then(function(ks){return Promise.all(ks.map(function(k){return caches.delete(k)}))}).then(go).catch(go);
-          }else{go();}
-        }).catch(function(){});
-      }catch(e){}
-    })();
-    </script>
   </head>
   <body class="bg-slate-50 text-slate-900">
     <div id="root"></div>

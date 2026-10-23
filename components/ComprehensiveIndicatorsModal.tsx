@@ -26,7 +26,7 @@ import {
   GraduationCap,
 } from "lucide-react";
 import { useGlobal } from "../context/GlobalState";
-import api from "../src/lib/api";
+import { localDB } from "../src/lib/localDB";
 import * as XLSX from "xlsx";
 
 interface ComprehensiveIndicatorsModalProps {
@@ -47,38 +47,17 @@ export const ComprehensiveIndicatorsModal: React.FC<
   useEffect(() => {
     let active = true;
     const fetchStandaloneData = async () => {
-      const cachedGS = localStorage.getItem('cached_standalone_GradeSheets');
-      const cachedCS = localStorage.getItem('cached_standalone_CaseStudies');
-
       try {
-        const [gsRes, csRes] = await Promise.all([
-          api.get("/sync/standalone/GradeSheets"),
-          api.get("/sync/standalone/CaseStudies")
+        const [gsData, csData] = await Promise.all([
+          localDB.gradeSheets.toArray(),
+          localDB.caseStudies.toArray(),
         ]);
         if (active) {
-          localStorage.setItem('cached_standalone_GradeSheets', JSON.stringify(gsRes.data || []));
-          localStorage.setItem('cached_standalone_CaseStudies', JSON.stringify(csRes.data || []));
-          setGradeSheets(gsRes.data || []);
-          setCaseStudies(csRes.data || []);
+          setGradeSheets(gsData || []);
+          setCaseStudies(csData || []);
         }
       } catch (e) {
-        console.error("Failed to load standalone indicators data", e);
-        if (active) {
-          if (cachedGS) {
-            try {
-              setGradeSheets(JSON.parse(cachedGS));
-            } catch (err) {
-              console.error("Failed to parse cached standalone GradeSheets:", err);
-            }
-          }
-          if (cachedCS) {
-            try {
-              setCaseStudies(JSON.parse(cachedCS));
-            } catch (err) {
-              console.error("Failed to parse cached standalone CaseStudies:", err);
-            }
-          }
-        }
+        console.error("Failed to load standalone indicators data from localDB", e);
       }
     };
     if (isOpen) {

@@ -6,7 +6,8 @@ import {
   X, ChevronDown, Briefcase, Users, Check, BarChart3, AlertCircle, FileText,
   LayoutGrid, List, Landmark
 } from "lucide-react";
-import api from "../src/lib/api";
+import { localDB } from "../src/lib/localDB";
+import { stampRecord } from "../src/lib/recordStamping";
 import { toast } from "sonner";
 
 interface ActivityProgramItem {
@@ -224,20 +225,10 @@ export default function SchoolActivitiesPage({ onBack }: SchoolActivitiesPagePro
     };
 
     try {
-      const res = await api.get("/sync/standalone/SchoolActivities");
-      const list = (res.data || []) as SchoolActivityReport[];
-      localStorage.setItem('cached_SchoolActivities', JSON.stringify(list));
+      const list = (await localDB.schoolActivities.toArray()) as SchoolActivityReport[];
       setActivities(list.filter(filterFn));
     } catch (err) {
-      console.error("Error fetching activities, falling back to cache:", err);
-      const cached = localStorage.getItem('cached_SchoolActivities');
-      if (cached) {
-        try {
-          setActivities((JSON.parse(cached) as SchoolActivityReport[]).filter(filterFn));
-        } catch (e) {
-          console.error(e);
-        }
-      }
+      console.error("Error fetching activities from localDB:", err);
     } finally {
       setLoading(false);
     }
@@ -246,8 +237,6 @@ export default function SchoolActivitiesPage({ onBack }: SchoolActivitiesPagePro
   useEffect(() => {
     if (activeSection !== "menu") {
       fetchActivities();
-      const interval = setInterval(fetchActivities, 15000);
-      return () => clearInterval(interval);
     }
   }, [activeSection, selectedSchool]);
 
@@ -343,60 +332,34 @@ export default function SchoolActivitiesPage({ onBack }: SchoolActivitiesPagePro
     payload.userId = currentUser?.id || "unknown";
     payload.timestamp = new Date().toISOString();
 
-    const cached = localStorage.getItem('cached_SchoolActivities');
-    let localList: SchoolActivityReport[] = cached ? JSON.parse(cached) : [];
-
     try {
-      const res = await api.post("/sync/standalone/SchoolActivities", payload);
-      const savedDoc = res.data;
-      
-      // Update local storage
-      if (editingId) {
-        localList = localList.map(x => x.id === editingId ? savedDoc : x);
-      } else {
-        localList.push(savedDoc);
-      }
-      localStorage.setItem('cached_SchoolActivities', JSON.stringify(localList));
-      
+      const existing = editingId ? await localDB.schoolActivities.get(editingId) : null;
+      const savedDoc = stampRecord(
+        payload as any,
+        { id: currentUser?.id, name: currentUser?.name },
+        existing
+      );
+      await localDB.schoolActivities.put(savedDoc);
+
       toast.success("تم حفظ تقرير النشاط بنجاح");
       setShowForm(false);
       fetchActivities();
     } catch (err) {
-      console.error("Save activity failed, fallback to local storage:", err);
-      // Offline fallback
-      const offlineDoc = { ...payload, id: editingId || "local_" + Math.random().toString(36).substring(2, 9) };
-      if (editingId) {
-        localList = localList.map(x => x.id === editingId ? offlineDoc : x);
-      } else {
-        localList.push(offlineDoc);
-      }
-      localStorage.setItem('cached_SchoolActivities', JSON.stringify(localList));
-      
-      // Queue background sync
-      api.post("/sync/standalone/SchoolActivities", offlineDoc).catch(() => {});
-      
-      toast.success("تم حفظ التقرير محلياً، وسيتم مزامنته عند العودة للاتصال بالإنترنت.");
-      setShowForm(false);
-      fetchActivities();
+      console.error("Save activity to localDB failed:", err);
+      toast.error("حدث خطأ أثناء حفظ تقرير النشاط محلياً.");
     }
   };
 
   const handleDelete = async (id: string) => {
     if (!window.confirm("هل أنت متأكد من رغبتك في حذف هذا النشاط بالكامل؟")) return;
 
-    const cached = localStorage.getItem('cached_SchoolActivities');
-    let localList: SchoolActivityReport[] = cached ? JSON.parse(cached) : [];
-    localList = localList.filter(x => x.id !== id);
-    localStorage.setItem('cached_SchoolActivities', JSON.stringify(localList));
-
     try {
-      await api.delete(`/sync/standalone/SchoolActivities/${id}`);
+      await localDB.schoolActivities.delete(id);
       toast.success("تم حذف النشاط بنجاح");
       fetchActivities();
     } catch (err) {
-      console.error("Error deleting activity:", err);
-      toast.success("تم الحذف محلياً، وسيتم المزامنة لاحقاً.");
-      fetchActivities();
+      console.error("Error deleting activity from localDB:", err);
+      toast.error("فشل حذف النشاط محلياً");
     }
   };
 

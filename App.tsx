@@ -2,7 +2,7 @@ import React, { useState, useMemo, useEffect, Suspense } from 'react';
 import { GlobalProvider, useGlobal } from './context/GlobalState';
 import Layout from './components/Layout';
 import Dashboard from './app/Dashboard';
-import DataManagementModal from './components/DataManagementModal';
+import DataSyncCenterModal from './components/DataSyncCenterModal';
 import AccessCodesModal from './components/AccessCodesModal';
 import IssuesAndSolutionsModal from './components/IssuesAndSolutionsModal';
 import CaseStudyModal from './components/CaseStudyModal';
@@ -826,7 +826,7 @@ const MainApp: React.FC = () => {
               {syncStatus === 'synced' && pendingSyncCount === 0 && (
                 <span className="inline-flex items-center gap-1 px-3 py-1 bg-emerald-50 text-emerald-700 border border-emerald-200 rounded-full font-black text-xs">
                   <Check size={12} />
-                  <span>متصل ومزامن</span>
+                  <span>محفوظ محلياً (أوف لاين)</span>
                 </span>
               )}
             </div>
@@ -898,14 +898,12 @@ const MainApp: React.FC = () => {
                 </button>
               )}
 
-              {(currentUser?.role === 'admin' || currentUser?.permissions?.all) && (
-                <button
-                  onClick={() => setIsDataModalOpen(true)}
-                  className="flex items-center gap-2 px-6 py-3 bg-white border-2 border-slate-100 rounded-[1.2rem] text-slate-600 font-black text-sm hover:border-blue-200 hover:shadow-md transition-all"
-                >
-                  <Database className="text-blue-600" size={18} /> إدارة البيانات
-                </button>
-              )}
+              <button
+                onClick={() => setIsDataModalOpen(true)}
+                className="flex items-center gap-2 px-6 py-3 bg-white border-2 border-slate-100 rounded-[1.2rem] text-slate-600 font-black text-sm hover:border-blue-200 hover:shadow-md transition-all"
+              >
+                <Database className="text-blue-600" size={18} /> إدارة وتبادل البيانات / المزامنة
+              </button>
             </>
           )}
         </div>
@@ -915,7 +913,7 @@ const MainApp: React.FC = () => {
         {renderView()}
       </div>
 
-      <DataManagementModal isOpen={isDataModalOpen} onClose={() => setIsDataModalOpen(false)} />
+      <DataSyncCenterModal isOpen={isDataModalOpen} onClose={() => setIsDataModalOpen(false)} />
       <AccessCodesModal
         isOpen={isCodesModalOpen}
         onClose={() => {

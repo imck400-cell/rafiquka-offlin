@@ -7,7 +7,28 @@ import {
   AuthUser,
   User,
 } from "../types";
-import api from "../src/lib/api";
+import {
+  localDB,
+  ensureSeedDatabase,
+  loadFullAppDataFromLocalDB,
+  saveSystemConfigToLocalDB,
+  saveSchoolSharedKeyToLocalDB,
+  saveUserCollectionToLocalDB,
+} from "../src/lib/localDB";
+import { stampRecord, stampArrayRecords } from "../src/lib/recordStamping";
+import {
+  normalizeArabicText,
+  normalizeSchool,
+  normalizeBranch,
+  normalizeGrade,
+  normalizeSection,
+  normalizeSubject,
+  hasIntersection,
+  isAdministrativePosition,
+  isEntityVisibleToSupervisor,
+  canUserModifyDataKey,
+  isModuleReadOnly,
+} from "../src/lib/NormalizationEngine";
 import { toast } from "sonner";
 import { isSameSchool } from "../app/evaluationUtils";
 
@@ -136,6 +157,10 @@ interface GlobalContextType {
   queueSyncRequest: (url: string, payload: any, method?: 'POST' | 'DELETE') => void;
   getReportMessageFooter: (dateStr?: string) => string;
   shareViaWhatsApp: (text: string, phone?: string) => void;
+  isEntityVisible: (entity: any, entityType?: string) => boolean;
+  canUserEdit: (moduleOrKey?: string | string[]) => boolean;
+  isReadOnlyModule: (moduleKey?: string) => boolean;
+  supervisorTeachers: any[];
 }
 
 const defaultMaxGrades = {
@@ -672,186 +697,21 @@ export const GlobalProvider: React.FC<{ children: React.ReactNode }> = ({
     sections: [],
   });
 
-  // Offline status & synchronization queue states
-  const [syncStatus, setSyncStatus] = useState<'synced' | 'pending' | 'syncing' | 'offline' | 'connecting'>(
-    navigator.onLine ? 'synced' : 'offline'
-  );
-  const [pendingSyncCount, setPendingSyncCount] = useState(0);
-  const isSyncing = useRef(false);
+  // 100% Serverless Offline LocalDB status (zero pending network queue)
+  const [syncStatus] = useState<'synced' | 'pending' | 'syncing' | 'offline' | 'connecting'>('synced');
+  const [pendingSyncCount] = useState(0);
 
-  // Trigger syncing of queued requests
-  const triggerSyncQueue = async () => {
-    if (isSyncing.current) return;
-    
-    // Check if offline
-    if (!navigator.onLine) {
-      setSyncStatus('offline');
-      const savedQueue = localStorage.getItem('pending_sync_queue');
-      const queue = savedQueue ? JSON.parse(savedQueue) : [];
-      setPendingSyncCount(queue.length);
-      return;
-    }
-
-    const savedQueue = localStorage.getItem('pending_sync_queue');
-    let queue = savedQueue ? JSON.parse(savedQueue) : [];
-    
-    if (queue.length === 0) {
-      setSyncStatus('synced');
-      setPendingSyncCount(0);
-      return;
-    }
-
-    isSyncing.current = true;
-    setSyncStatus('connecting');
-    setPendingSyncCount(queue.length);
-
-    try {
-      while (true) {
-        // Read fresh queue state from localStorage in each iteration
-        const currentSaved = localStorage.getItem('pending_sync_queue');
-        const currentQueue = currentSaved ? JSON.parse(currentSaved) : [];
-        if (currentQueue.length === 0) {
-          break;
-        }
-
-        const item = currentQueue[0];
-        console.log(`🔄 Syncing item to server: ${item.method || 'POST'} ${item.url}`, item.payload);
-        
-        try {
-          if (item.method === 'DELETE') {
-            await api.delete(item.url);
-          } else {
-            await api.post(item.url, item.payload);
-          }
-        } catch (err: any) {
-          console.error("Syncing item failed:", item, err);
-          const isNetworkError = !err.response || err.code === 'ERR_NETWORK' || err.message === 'Network Error';
-          if (isNetworkError) {
-            setSyncStatus(navigator.onLine ? 'connecting' : 'offline');
-            throw err; // Re-throw to stop processing and keep it in the queue
-          }
-          // Non-network error (e.g. 400 validation error, 403, 500): Skip it to prevent locking queue
-        }
-
-        // Read fresh queue again to get any requests appended during the network call
-        const freshSaved = localStorage.getItem('pending_sync_queue');
-        let freshQueue = freshSaved ? JSON.parse(freshSaved) : [];
-        
-        // Remove the processed item by ID (ensuring we don't accidentally remove a different item if queue shifted)
-        if (freshQueue.length > 0 && freshQueue[0].id === item.id) {
-          freshQueue.shift();
-        } else {
-          freshQueue = freshQueue.filter((q: any) => q.id !== item.id);
-        }
-
-        localStorage.setItem('pending_sync_queue', JSON.stringify(freshQueue));
-        setPendingSyncCount(freshQueue.length);
-      }
-      setSyncStatus('synced');
-      toast.success("تم مزامنة جميع التعديلات بنجاح مع السيرفر!");
-
-      // Check if there is a deferred system update waiting to be applied
-      if (localStorage.getItem('sw_update_ready') === 'true') {
-        localStorage.removeItem('sw_update_ready');
-        console.log("🔄 Applying deferred system update after sync completion...");
-        window.location.reload();
-      }
-    } catch (err) {
-      console.error("Syncing offline queue failed:", err);
-    } finally {
-      isSyncing.current = false;
-      // Trigger again in case new items were added right when we were exiting the finally block
-      const finalSaved = localStorage.getItem('pending_sync_queue');
-      const finalQueue = finalSaved ? JSON.parse(finalSaved) : [];
-      setPendingSyncCount(finalQueue.length);
-      if (finalQueue.length > 0 && navigator.onLine) {
-        // Run triggerSyncQueue asynchronously to prevent infinite call stack
-        setTimeout(() => triggerSyncQueue(), 50);
-      }
-    }
+  const queueSyncRequest = (_url: string, _payload: any, _method: 'POST' | 'DELETE' = 'POST') => {
+    // No-op in 100% Serverless Offline mode: all writes go directly to localDB (IndexedDB)
   };
 
-  const queueSyncRequest = (url: string, payload: any, method: 'POST' | 'DELETE' = 'POST') => {
-    const savedQueue = localStorage.getItem('pending_sync_queue');
-    let queue = savedQueue ? JSON.parse(savedQueue) : [];
-
-    // Overwrite same URL & key/id to prevent duplicate database records (only for POST)
-    const existingIndex = queue.findIndex(
-      (item: any) => item.url === url && item.method === method && item.payload?.key === payload?.key
-    );
-
-    if (existingIndex !== -1 && method === 'POST') {
-      queue[existingIndex].payload = payload;
-      queue[existingIndex].timestamp = Date.now();
-    } else {
-      queue.push({
-        id: Math.random().toString(36).substring(2, 9),
-        url,
-        payload,
-        method,
-        timestamp: Date.now()
-      });
-    }
-
-    localStorage.setItem('pending_sync_queue', JSON.stringify(queue));
-    setPendingSyncCount(queue.length);
-    setSyncStatus('pending');
-    
-    triggerSyncQueue();
-  };
-
-  // Automatically save full state to localStorage on modification
-  useEffect(() => {
-    if (data && data !== defaultData) {
-      localStorage.setItem('cached_app_data', JSON.stringify(data));
-    }
-  }, [data]);
-
-  // Cache authenticated user profile
+  // Cache authenticated user profile for instant session continuity
   useEffect(() => {
     if (currentUser) {
       localStorage.setItem('cached_auth_user', JSON.stringify(currentUser));
     }
   }, [currentUser]);
 
-  // Monitor network connectivity changes
-  useEffect(() => {
-    const handleOnline = () => {
-      console.log("📶 Network status: Online. Flusher triggered.");
-      const saved = localStorage.getItem('pending_sync_queue');
-      const q = saved ? JSON.parse(saved) : [];
-      setSyncStatus(q.length > 0 ? 'connecting' : 'synced');
-      triggerSyncQueue();
-    };
-
-    const handleOffline = () => {
-      console.log("📴 Network status: Offline.");
-      setSyncStatus('offline');
-    };
-
-    window.addEventListener('online', handleOnline);
-    window.addEventListener('offline', handleOffline);
-
-    // Initial count check
-    const savedQueue = localStorage.getItem('pending_sync_queue');
-    const queue = savedQueue ? JSON.parse(savedQueue) : [];
-    setPendingSyncCount(queue.length);
-    if (queue.length > 0) {
-      setSyncStatus(navigator.onLine ? 'pending' : 'offline');
-      triggerSyncQueue();
-    } else {
-      setSyncStatus(navigator.onLine ? 'synced' : 'offline');
-    }
-
-    // Interval flusher check (every 30 seconds)
-    const interval = setInterval(triggerSyncQueue, 30000);
-
-    return () => {
-      window.removeEventListener('online', handleOnline);
-      window.removeEventListener('offline', handleOffline);
-      clearInterval(interval);
-    };
-  }, []);
   const [dateRange, setDateRange] = useState({ from: "", to: "" });
 
   // 🔥 GLOBAL REAL-TIME SYNC FOR PROFILES - Handled in the main effect below to avoid conflicts
@@ -921,10 +781,10 @@ export const GlobalProvider: React.FC<{ children: React.ReactNode }> = ({
         ? data.availableSchools || []
         : selectedSchools;
       return data.users
-        .filter((u) => u.schools.some((s) => allSchools.includes(s)))
+        .filter((u) => hasIntersection(u.schools, allSchools, normalizeSchool))
         .map((u) => u.id);
     } else {
-      // Non-admin logic: see fellow members based on overlap
+      // Non-admin logic: see fellow members based on normalized overlap
       return data.users
         .filter((u) => {
           if (u.id === currentUser.id) return true;
@@ -932,39 +792,54 @@ export const GlobalProvider: React.FC<{ children: React.ReactNode }> = ({
             u.role === "admin" || u.permissions?.all === true;
           if (!isAdminOrFull && isTargetAdmin) return false;
 
-          return u.schools.some((s) => {
-            if (!selectedSchools.includes(s)) return false;
+          return (u.schools || []).some((s) => {
+            if (!hasIntersection([s], selectedSchools, normalizeSchool)) return false;
 
-            // Branch check
-            const managerBranches =
-              currentUser.permissions?.schoolsAndBranches?.[s] || [];
+            // Branch check using normalizeBranch
+            const sab = currentUser.permissions?.schoolsAndBranches || {};
+            const managerBranchKey = Object.keys(sab).find((k) =>
+              hasIntersection([k], [s], normalizeSchool)
+            );
+            const managerBranches = managerBranchKey ? sab[managerBranchKey] || [] : [];
             if (managerBranches.length > 0) {
-              const targetBranches =
-                u.permissions?.schoolsAndBranches?.[s] || [];
-              // If target has branch restrictions, they must overlap
-              if (targetBranches.length > 0 && !managerBranches.some((b) => targetBranches.includes(b))) {
+              const targetSab = u.permissions?.schoolsAndBranches || {};
+              const targetBranchKey = Object.keys(targetSab).find((k) =>
+                hasIntersection([k], [s], normalizeSchool)
+              );
+              const targetBranches = targetBranchKey ? targetSab[targetBranchKey] || [] : [];
+              if (
+                targetBranches.length > 0 &&
+                !hasIntersection(managerBranches, targetBranches, normalizeBranch)
+              ) {
                 return false;
               }
             }
 
-            // If not a school-wide viewer, we must enforce grades/sections overlap if defined
+            // If not a school-wide viewer, enforce grades/sections/subjects overlap using NormalizationEngine
             if (!isSchoolWideViewer) {
               const managerGrades = currentUser.grades || [];
               const managerSections = currentUser.sections || [];
+              const managerSubjects = currentUser.subjects || [];
               const targetGrades = u.grades || [];
               const targetSections = u.sections || [];
+              const targetSubjects = u.subjects || [];
 
-               // Only check overlap if the manager actually has specific grades/sections assigned
-               // If the manager has no grades/sections assigned but isn't a schoolWideViewer, they shouldn't see anyone except themselves (which is handled above)
-              if (managerGrades.length === 0 && managerSections.length === 0) {
-                 return false;
+              if (
+                managerGrades.length === 0 &&
+                managerSections.length === 0 &&
+                managerSubjects.length === 0
+              ) {
+                return false;
               }
 
               if (managerGrades.length > 0 && targetGrades.length > 0) {
-                if (!managerGrades.some(g => targetGrades.includes(g))) return false;
+                if (!hasIntersection(managerGrades, targetGrades, normalizeGrade)) return false;
               }
               if (managerSections.length > 0 && targetSections.length > 0) {
-                 if (!managerSections.some(sec => targetSections.includes(sec))) return false;
+                if (!hasIntersection(managerSections, targetSections, normalizeSection)) return false;
+              }
+              if (managerSubjects.length > 0 && targetSubjects.length > 0) {
+                if (!hasIntersection(managerSubjects, targetSubjects, normalizeSubject)) return false;
               }
             }
 
@@ -1004,24 +879,42 @@ export const GlobalProvider: React.FC<{ children: React.ReactNode }> = ({
       const isGeneralSupervisor =
         currentUser?.role === "admin" || currentUser?.permissions?.all === true;
 
-      // School & Branch Isolation (Even for items without userId like synced staff items)
-      if (item.school && !isGeneralSupervisor) {
+      if (isGeneralSupervisor) return true;
+
+      // Normalized School & Branch Isolation
+      const itemSchools = [item.school, item.schoolName, item.schoolId].filter(Boolean);
+      if (itemSchools.length > 0) {
         const userSchools = (currentUser?.selectedSchool || "")
           .split(",")
-          .map((s) => s.trim());
-        if (!userSchools.includes("all") && !userSchools.includes(item.school))
+          .map((s) => s.trim())
+          .filter(Boolean);
+        if (!hasIntersection(userSchools, itemSchools, normalizeSchool)) {
           return false;
+        }
       }
-      if (item.branch && !isGeneralSupervisor) {
+
+      const itemBranches = [item.branch, item.branchName].filter(Boolean);
+      if (itemBranches.length > 0) {
         const userBranches = (currentUser?.selectedBranch || "")
           .split(",")
-          .map((b) => b.trim());
+          .map((b) => b.trim())
+          .filter(Boolean);
         if (
           userBranches.length > 0 &&
-          !userBranches.includes("all") &&
-          !userBranches.includes(item.branch)
-        )
+          !hasIntersection(userBranches, itemBranches, normalizeBranch)
+        ) {
           return false;
+        }
+      }
+
+      // Apply strict supervisor specialization isolation for educational evaluations, homeworks, daily preps, and peer visits
+      if (
+        key === "teacherEvaluations" ||
+        key === "schoolHomeworks" ||
+        key === "dailyPreparations" ||
+        key === "peerVisits"
+      ) {
+        return isEntityVisibleToSupervisor(item, currentUser, key);
       }
 
       // Always filter: if item has no userId, keep it (shared data)
@@ -1033,7 +926,6 @@ export const GlobalProvider: React.FC<{ children: React.ReactNode }> = ({
       if (key === "dailyReports") {
         const periodType = item.periodType || "daily";
         if (periodType === "daily") {
-          // Verify that the daily report belongs to the user's active/authorized schools
           const rSchools = [item.schoolId, item.schoolName, item.school]
             .filter(Boolean)
             .flatMap((s: string) => String(s).split(',').map((x: string) => x.trim()));
@@ -1043,13 +935,15 @@ export const GlobalProvider: React.FC<{ children: React.ReactNode }> = ({
             ...(currentUser?.selectedSchool ? currentUser.selectedSchool.split(',') : [])
           ].map((s: string) => s.trim()).filter(Boolean);
 
-          if (userSchools.includes("all") || rSchools.length === 0 || rSchools.some((s: string) => userSchools.includes(s))) {
-            return true; // Allowed: belongs to user's current school scope regardless of recording supervisor
+          if (
+            rSchools.length === 0 ||
+            hasIntersection(userSchools, rSchools, normalizeSchool)
+          ) {
+            return true;
           }
-          return false; // Isolated: belongs to another school
+          return false;
         }
         if (!isAdminOrFull) {
-          // Aggregated reports (weekly, monthly, etc.) are strictly private to the user
           return item.userId === currentUser?.id;
         }
       }
@@ -1068,39 +962,50 @@ export const GlobalProvider: React.FC<{ children: React.ReactNode }> = ({
     }
     const currentBranch = currentUser?.selectedBranch?.trim();
 
-    // 1. Filter secretariatStaff (Teachers) to match user's school and branch
+    const isSuperAdmin =
+      currentUser?.role === "admin" || currentUser?.permissions?.all === true;
+    const hasAdminOrSecretariatAccess =
+      isSuperAdmin ||
+      !!currentUser?.permissions?.secretariat ||
+      !!currentUser?.permissions?.adminFollowUp ||
+      isAdministrativePosition(currentUser?.jobTitle, currentUser?.role);
+
+    // 1. Filter secretariatStaff (Teachers & Staff) using NormalizationEngine
     if (newData.secretariatStaff) {
       newData.secretariatStaff = newData.secretariatStaff.filter((s: any) => {
-        // School check
+        // Normalized School check
         if (activeSchool && activeSchool !== "all") {
-          if (s.school && String(s.school).trim() !== String(activeSchool).trim()) {
+          if (s.school && !hasIntersection([s.school], [activeSchool], normalizeSchool)) {
             return false;
           }
         }
-        // Branch check
+        // Normalized Branch check
         if (currentBranch && currentBranch !== "all" && currentBranch !== "الجميع") {
           const allowedBranches = currentBranch.split(",").map((b: string) => b.trim());
-          if (s.branch && !allowedBranches.includes(String(s.branch).trim())) {
+          if (s.branch && !hasIntersection([s.branch], allowedBranches, normalizeBranch)) {
             return false;
           }
+        }
+        // If user is a specialized Educational Supervisor / Teacher (without Secretariat or Admin Follow-Up roles),
+        // enforce strict supervisor isolation (exclude administrative staff + require grade/subject/section intersection)
+        if (currentUser && !hasAdminOrSecretariatAccess) {
+          return isEntityVisibleToSupervisor(s, currentUser, "secretariatStaff");
         }
         return true;
       });
     }
 
-    // 2. Filter secretariatStudents (Students) to match user's school and branch
+    // 2. Filter secretariatStudents (Students) using NormalizationEngine
     if (newData.secretariatStudents) {
       newData.secretariatStudents = newData.secretariatStudents.filter((s: any) => {
-        // School check
         if (activeSchool && activeSchool !== "all") {
-          if (s.school && String(s.school).trim() !== String(activeSchool).trim()) {
+          if (s.school && !hasIntersection([s.school], [activeSchool], normalizeSchool)) {
             return false;
           }
         }
-        // Branch check
         if (currentBranch && currentBranch !== "all" && currentBranch !== "الجميع") {
           const allowedBranches = currentBranch.split(",").map((b: string) => b.trim());
-          if (s.branch && !allowedBranches.includes(String(s.branch).trim())) {
+          if (s.branch && !hasIntersection([s.branch], allowedBranches, normalizeBranch)) {
             return false;
           }
         }
@@ -1155,7 +1060,7 @@ export const GlobalProvider: React.FC<{ children: React.ReactNode }> = ({
       }
     }
 
-    // Activity arrays — filter by both user and date
+    // Activity arrays — filter by both user/supervisor specialization and date
     const activityKeys = [
       "substitutions",
       "dailyReports",
@@ -1173,10 +1078,13 @@ export const GlobalProvider: React.FC<{ children: React.ReactNode }> = ({
       "genericSpecialReports",
       "taskReports",
       "adminReports",
+      "teacherEvaluations",
+      "schoolHomeworks",
+      "dailyPreparations",
     ];
 
-    // Entity arrays — filter by user only (date is irrelevant for profile cards)
-    const entityKeys = ["studentReports", "timetable", "teacherFollowUps"];
+    // Entity arrays — filter by user/supervisor specialization only (date is irrelevant for profile cards)
+    const entityKeys = ["studentReports", "timetable", "teacherFollowUps", "peerVisits"];
 
     activityKeys.forEach((key) => {
       const k = key as keyof AppData;
@@ -1197,7 +1105,36 @@ export const GlobalProvider: React.FC<{ children: React.ReactNode }> = ({
     });
 
     return newData;
-  }, [data, effectiveUserIds, dateRange, currentUser?.selectedSchool, currentUser?.selectedBranch]);
+  }, [data, effectiveUserIds, dateRange, currentUser]);
+
+  // Derived list of teachers strictly filtered for Educational Supervision via NormalizationEngine
+  const supervisorTeachers = React.useMemo(() => {
+    if (!currentUser) return [];
+    return (data.secretariatStaff || []).filter((s: any) =>
+      isEntityVisibleToSupervisor(s, currentUser, "secretariatStaff")
+    );
+  }, [data.secretariatStaff, currentUser]);
+
+  const isEntityVisible = React.useCallback(
+    (entity: any, entityType?: string) => {
+      return isEntityVisibleToSupervisor(entity, currentUser, entityType);
+    },
+    [currentUser]
+  );
+
+  const canUserEdit = React.useCallback(
+    (moduleOrKey?: string | string[]) => {
+      return canUserModifyDataKey(currentUser, moduleOrKey);
+    },
+    [currentUser]
+  );
+
+  const isReadOnlyModule = React.useCallback(
+    (moduleKey?: string) => {
+      return isModuleReadOnly(currentUser, moduleKey);
+    },
+    [currentUser]
+  );
 
   useEffect(() => {
     if (isAuthenticated && currentUser && currentUser.role !== "admin") {
@@ -1256,424 +1193,96 @@ export const GlobalProvider: React.FC<{ children: React.ReactNode }> = ({
     return () => clearTimeout(timer);
   }, [data.users, isAuthenticated, currentUser?.id]);
 
-  const activeListeners = React.useRef<Set<string>>(new Set());
-
-  // 1. Initial mounting and session restoration
+  // 1. Initial mounting, Seed Admin initialization, and session restoration from localDB
   useEffect(() => {
-    async function restoreSession() {
-      const token = localStorage.getItem('auth_token');
-      if (token) {
-        try {
-          const savedSchool = localStorage.getItem('selected_school') || '';
-          const savedYear = localStorage.getItem('selected_year') || '';
-          const savedBranch = localStorage.getItem('selected_branch') || '';
-          
-          if (!navigator.onLine) {
-            // Restore session offline from cached auth user
-            const cachedUserStr = localStorage.getItem('cached_auth_user');
-            if (cachedUserStr) {
-              const cachedUser = JSON.parse(cachedUserStr);
-              setCurrentUser(cachedUser);
-              setIsAuthenticated(true);
-              console.log("Restored offline session for user:", cachedUser.name);
-              
-              // Load offline app data
-              const cachedDataStr = localStorage.getItem('cached_app_data');
-              if (cachedDataStr) {
-                setData(JSON.parse(cachedDataStr));
-              }
-              return;
-            }
-          }
-
-          const res = await api.get(`/user/profile?school=${encodeURIComponent(savedSchool)}&year=${encodeURIComponent(savedYear)}&branch=${encodeURIComponent(savedBranch)}`);
-          setIsAuthenticated(true);
-          const validatedUser = res.data.user;
-          setCurrentUser(validatedUser);
-          if (validatedUser) {
-            if (validatedUser.selectedSchool) {
-              localStorage.setItem('selected_school', validatedUser.selectedSchool);
-            }
-            if (validatedUser.selectedYear) {
-              localStorage.setItem('selected_year', validatedUser.selectedYear);
-            }
-            if (validatedUser.selectedBranch) {
-              localStorage.setItem('selected_branch', validatedUser.selectedBranch);
-            }
-          }
-        } catch (error: any) {
-          console.error("Failed to restore session, checking network error:", error);
-          const isNetworkError = !error.response || error.code === 'ERR_NETWORK' || error.message === 'Network Error';
-          if (isNetworkError) {
-            const cachedUserStr = localStorage.getItem('cached_auth_user');
-            if (cachedUserStr) {
-              const cachedUser = JSON.parse(cachedUserStr);
-              setCurrentUser(cachedUser);
-              setIsAuthenticated(true);
-              console.log("Restored session from cache due to network glitch");
-              
-              const cachedDataStr = localStorage.getItem('cached_app_data');
-              if (cachedDataStr) {
-                setData(JSON.parse(cachedDataStr));
-              }
-              return;
-            }
-          }
-          // Only remove token if it's a real Auth error (401, 403, etc.)
-          localStorage.removeItem('auth_token');
-        }
-      }
-    }
-    restoreSession();
-
-    // Fetch initial global configurations once on mount
-    async function loadGlobalConfigs() {
+    let mounted = true;
+    async function initLocalSystem() {
       try {
-        if (!navigator.onLine) {
-          throw new Error("Offline status");
-        }
-        const res = await api.get('/sync/global');
-        setData((prev) => ({
-          ...prev,
-          ...res.data
-        }));
-      } catch (error) {
-        console.error("Failed to load global configurations, loading offline cache:", error);
-        const cached = localStorage.getItem('cached_app_data');
-        if (cached) {
+        await ensureSeedDatabase();
+        const token = localStorage.getItem('auth_token');
+        const cachedUserStr = localStorage.getItem('cached_auth_user');
+        const savedSchool = localStorage.getItem('selected_school') || '';
+
+        let restoredUser: AuthUser | null = null;
+        if (token && cachedUserStr) {
           try {
-            const parsed = JSON.parse(cached);
-            setData(parsed);
-            console.log("Successfully loaded offline fallback configurations");
+            restoredUser = JSON.parse(cachedUserStr);
           } catch (e) {
-            console.error("Failed to parse cached app data", e);
+            console.error("Failed to parse cached_auth_user:", e);
           }
         }
+
+        const loadedData = await loadFullAppDataFromLocalDB(
+          defaultData,
+          restoredUser?.selectedSchool || savedSchool,
+          restoredUser?.id
+        );
+
+        if (!mounted) return;
+
+        if (loadedData.dailyReports && Array.isArray(loadedData.dailyReports)) {
+          loadedData.dailyReports = normalizeDailyReports(loadedData.dailyReports);
+        }
+
+        setData(loadedData);
+
+        if (restoredUser) {
+          const dbUser = loadedData.users.find((u) => u.id === restoredUser!.id);
+          if (dbUser) {
+            const syncedUser: AuthUser = {
+              ...restoredUser,
+              name: dbUser.name,
+              role: dbUser.role,
+              jobTitle: dbUser.jobTitle,
+              schools: dbUser.schools || [],
+              grades: dbUser.grades || [],
+              sections: dbUser.sections || [],
+              subjects: dbUser.subjects || [],
+              permissions: dbUser.permissions,
+              customSchoolProfiles: dbUser.customSchoolProfiles,
+            };
+            setCurrentUser(syncedUser);
+            setIsAuthenticated(true);
+          } else {
+            setCurrentUser(restoredUser);
+            setIsAuthenticated(true);
+          }
+        }
+      } catch (err) {
+        console.error("Failed initializing localDB system:", err);
       }
     }
-    loadGlobalConfigs();
+    initLocalSystem();
+    return () => {
+      mounted = false;
+    };
   }, []);
 
-  // 2. Dynamic polling effect when authenticated
+  // 2. Hydrate school & user data immediately from localDB when active school or user changes
   useEffect(() => {
-    if (!isAuthenticated || !currentUser) {
-      // No unauthenticated polling needed anymore since login is dynamic and secure
-      return;
-    }
-
-    const schoolId = currentUser.selectedSchool?.split(",")[0]?.trim();
-    const userId = currentUser.id;
-
-    if (!schoolId || !userId) return;
-
-    const fetchSyncData = async () => {
+    if (!isAuthenticated || !currentUser) return;
+    let active = true;
+    async function hydrateActiveScope() {
       try {
-        // Skip polling if there are active sync operations in progress
-        // This prevents the poller from overwriting local deletions/changes
-        // before they reach the server
-        if (activeSyncCount.current > 0) {
-          console.log("Skipping poll: active sync operations in progress", activeSyncCount.current);
-          return;
+        const loadedData = await loadFullAppDataFromLocalDB(
+          defaultData,
+          currentUser?.selectedSchool,
+          currentUser?.id
+        );
+        if (!active) return;
+        if (loadedData.dailyReports && Array.isArray(loadedData.dailyReports)) {
+          loadedData.dailyReports = normalizeDailyReports(loadedData.dailyReports);
         }
-
-        // Also skip if there are pending items in the sync queue
-        const pendingQueueStr = localStorage.getItem('pending_sync_queue');
-        if (pendingQueueStr) {
-          try {
-            const pendingQueue = JSON.parse(pendingQueueStr);
-            if (Array.isArray(pendingQueue) && pendingQueue.length > 0) {
-              console.log("Skipping poll: pending sync queue has", pendingQueue.length, "items");
-              return;
-            }
-          } catch(e) { /* ignore parse errors */ }
-        }
-
-        // Parallel fetching of school-shared logs and user-personal logs
-        const [sharedRes, userRes] = await Promise.all([
-          api.get(`/sync/school/${encodeURIComponent(schoolId)}`),
-          api.get(`/sync/school/${encodeURIComponent(schoolId)}/user/${encodeURIComponent(userId)}/data`),
-        ]);
-
-        setData((prev) => {
-          // Union merge for dailyPreparations, studentEvaluations, teacherEvaluations from userRes.data to prevent losing legacy entries
-          const mergedShared = { ...sharedRes.data };
-          const mergeKeys = [
-            "dailyPreparations",
-            "studentEvaluations",
-            "teacherEvaluations",
-            "substitutions",
-            "timetable",
-            "dailyReports",
-            "violations",
-            "parentVisits",
-            "teacherFollowUps",
-            "studentReports",
-            "absenceLogs",
-            "studentLatenessLogs",
-            "studentViolationLogs",
-            "exitLogs",
-            "damageLogs",
-            "parentVisitLogs",
-            "examLogs",
-            "selfEvaluations",
-            "notebookFollowUpLogs",
-            "notebookReportArchives",
-            "genericSpecialReports",
-            "taskReports",
-            "adminReports"
-          ];
-          
-          mergeKeys.forEach((key) => {
-            const sharedArr = mergedShared[key] || [];
-            const userArr = userRes.data?.[key] || [];
-            if (Array.isArray(sharedArr) && Array.isArray(userArr) && userArr.length > 0) {
-              const map = new Map();
-              sharedArr.forEach((item) => {
-                if (item && item.id) map.set(item.id, item);
-              });
-              userArr.forEach((item) => {
-                if (item && item.id && !map.has(item.id)) {
-                  map.set(item.id, item);
-                }
-              });
-              mergedShared[key] = Array.from(map.values());
-            }
-          });
-
-          if (Array.isArray(mergedShared.dailyReports)) {
-            mergedShared.dailyReports = normalizeDailyReports(mergedShared.dailyReports);
-          }
-
-          // Clean userRes.data from strictlySharedKeys to prevent overriding shared school data
-          const cleanUserData = { ...userRes.data };
-          const strictlySharedKeys = [
-            "profile",
-            "users",
-            "secretariatStudents",
-            "secretariatStaff",
-            "customSupervisionCriteria",
-            "selfEvaluationTemplates",
-            "courseEvaluationSchema_v3",
-            "metricsList",
-            "adminMetricsList",
-            "branchMetrics",
-            "adminBranchMetrics",
-            "adminFollowUpTypes",
-            "adminActivitiesList",
-            "adminBranchActivities",
-            "adminIndividualReportFields",
-            "adminIndividualReports",
-            "addedTasks",
-            "studentReinforcements",
-            "postponedTasks",
-            "issueRecommendations",
-            "creativityRecords",
-            "trainingEvaluations",
-            "transportBuses",
-            "transportLogs",
-            "transportDailyStatus",
-            "communicationPosts",
-            "schoolHomeworks",
-            "studentEvaluations",
-            "teacherEvaluations",
-            "dailyPreparations",
-            "substitutions",
-            "timetable",
-            "dailyReports",
-            "violations",
-            "parentVisits",
-            "teacherFollowUps",
-            "studentReports",
-            "absenceLogs",
-            "studentLatenessLogs",
-            "studentViolationLogs",
-            "exitLogs",
-            "damageLogs",
-            "parentVisitLogs",
-            "examLogs",
-            "selfEvaluations",
-            "notebookFollowUpLogs",
-            "notebookReportArchives",
-            "genericSpecialReports",
-            "taskReports",
-            "financeRecords",
-            "adminReports"
-          ];
-          strictlySharedKeys.forEach((key) => {
-            delete cleanUserData[key];
-          });
-
-          // Normalize server users to ensure camelCase keys exist
-          const normalizedServerUsers = (sharedRes.data.users || []).map((u: any) => ({
-            ...u,
-            jobTitle: u.jobTitle || u.job_title || "",
-            academicYears: u.academicYears || u.academic_years || [],
-            startDate: u.startDate || u.start_date || "",
-            expiryDate: u.expiryDate || u.expiry_date || "",
-          }));
-
-          // Merge school-scoped arrays rather than replacing to protect multi-tenant state
-          const localUsers = prev.users || [];
-          const serverUserIds = new Set(normalizedServerUsers.map((u: any) => u.id));
-          
-          // Protect sequential offline sync train: ONLY preserve local users if they are genuinely
-          // queued in the offline outbox / pending_sync_queue awaiting server upload
-          let pendingLocalUserIds = new Set<string>();
-          try {
-            const queueStr = localStorage.getItem('pending_sync_queue');
-            if (queueStr) {
-              const queue = JSON.parse(queueStr);
-              if (Array.isArray(queue)) {
-                queue.forEach((q: any) => {
-                  if (q?.key === 'users' && Array.isArray(q?.data)) {
-                    q.data.forEach((item: any) => {
-                      if (item?.id) pendingLocalUserIds.add(item.id);
-                    });
-                  }
-                });
-              }
-            }
-          } catch (e) { /* ignore */ }
-
-          const pendingLocalUsers = localUsers.filter((u: any) => {
-            if (!u || !u.id) return false;
-            return pendingLocalUserIds.has(u.id) && !serverUserIds.has(u.id);
-          });
-          
-          const otherSchoolsUsers = localUsers.filter((u: any) => {
-            if (!u) return false;
-            const userSchools = u.schools || [];
-            const belongsToPolledSchool = userSchools.includes(schoolId) || userSchools.includes('all') || u.role === 'admin';
-            return !belongsToPolledSchool;
-          });
-          // Merge: other-school users + server users + any pending-local users not yet on server
-          const mergedUsers = [...otherSchoolsUsers, ...normalizedServerUsers, ...pendingLocalUsers];
-
-          const localStudents = prev.secretariatStudents || [];
-          const newServerStudents = sharedRes.data.secretariatStudents || [];
-          const otherSchoolsStudents = localStudents.filter((item: any) => {
-            if (!item) return false;
-            const belongsToPolledSchool = (item.school && item.school.trim() === schoolId) ||
-                                          (item.schoolBranch && item.schoolBranch.startsWith(schoolId));
-            return !belongsToPolledSchool;
-          });
-          const mergedStudents = [...otherSchoolsStudents, ...newServerStudents];
-
-          const localStaff = prev.secretariatStaff || [];
-          const newServerStaff = sharedRes.data.secretariatStaff || [];
-          const otherSchoolsStaff = localStaff.filter((item: any) => {
-            if (!item) return false;
-            const belongsToPolledSchool = (item.school && item.school.trim() === schoolId) ||
-                                          (item.schoolBranch && item.schoolBranch.startsWith(schoolId));
-            return !belongsToPolledSchool;
-          });
-          const mergedStaff = [...otherSchoolsStaff, ...newServerStaff];
-
-          const localCriteria = prev.customSupervisionCriteria || [];
-          const newServerCriteria = sharedRes.data.customSupervisionCriteria || [];
-          const otherSchoolsCriteria = localCriteria.filter((item: any) => {
-            if (!item) return false;
-            const belongsToPolledSchool = item.school === schoolId;
-            return !belongsToPolledSchool;
-          });
-          const mergedCriteria = [...otherSchoolsCriteria, ...newServerCriteria];
-
-          // Strict Multi-School Data Isolation: Keyed merge for teacherEvaluations
-          const cleanSchoolId = (schoolId || "").trim();
-          const localTeacherEvaluations = prev.teacherEvaluations || [];
-          const newServerTeacherEvaluations = sharedRes.data.teacherEvaluations || [];
-          // 1. عزل صارم: الاحتفاظ بزيارات المدارس الأخرى بشرط وجود اسم المدرسة وتطابقه
-          const otherSchoolsTeacherEvaluations = localTeacherEvaluations.filter((item: any) => {
-            if (!item || !item.school) return false;
-            return !isSameSchool(item.school, cleanSchoolId);
-          });
-          // 2. دمج زيارات المدرسة الحالية بالمعرّف الفريد لمنع التكرار وتفادي المسح
-          const serverEvalIds = new Set(newServerTeacherEvaluations.map((e: any) => e.id));
-          const pendingLocalEvaluations = localTeacherEvaluations.filter((item: any) => {
-            if (!item || !item.school) return false;
-            return isSameSchool(item.school, cleanSchoolId) && !serverEvalIds.has(item.id);
-          });
-          const mergedTeacherEvaluations = [
-            ...otherSchoolsTeacherEvaluations,
-            ...newServerTeacherEvaluations,
-            ...pendingLocalEvaluations
-          ];
-
-          // Server is the single source of truth for users - replace, don't merge with stale local data
-          // CRITICAL: Remove global-only keys from mergedShared to prevent
-          // stale school_shared_data from overwriting current global configs.
-          // availableSchools and availableYears are global configs stored in system_configs,
-          // but may also exist as stale entries in school_shared_data.
-          delete mergedShared.availableSchools;
-          delete mergedShared.availableYears;
-          delete mergedShared.aboutSliderImages;
-          delete mergedShared.aboutExternalLinks;
-          delete mergedShared.aboutLogoImg;
-          delete mergedShared.schoolBranches;
-
-          // Delete the merged arrays from raw payloads to prevent them from being overwritten during spread
-          delete mergedShared.users;
-          delete mergedShared.secretariatStudents;
-          delete mergedShared.secretariatStaff;
-          delete mergedShared.customSupervisionCriteria;
-          delete mergedShared.teacherEvaluations;
-
-          delete cleanUserData.users;
-          delete cleanUserData.secretariatStudents;
-          delete cleanUserData.secretariatStaff;
-          delete cleanUserData.customSupervisionCriteria;
-          delete cleanUserData.teacherEvaluations;
-
-          const merged = {
-            ...prev,
-            ...mergedShared,
-            ...cleanUserData,
-            users: mergedUsers,
-            secretariatStudents: mergedStudents,
-            secretariatStaff: mergedStaff,
-            customSupervisionCriteria: mergedCriteria,
-            teacherEvaluations: mergedTeacherEvaluations,
-          };
-          if (sharedRes.data && sharedRes.data.profile) {
-            merged.profiles = {
-              ...(prev.profiles || {}),
-              [schoolId]: sharedRes.data.profile,
-            };
-          }
-          return merged;
-        });
+        setData(loadedData);
       } catch (err) {
-        console.error("Poller synchronization failed:", err);
+        console.error("Failed hydrating active school/user scope from localDB:", err);
       }
+    }
+    hydrateActiveScope();
+    return () => {
+      active = false;
     };
-
-    fetchSyncData();
-    // Poll every 60 seconds (1 minute) to drastically reduce database connection spikes
-    const interval = setInterval(fetchSyncData, 60000);
-    return () => clearInterval(interval);
   }, [isAuthenticated, currentUser?.id, currentUser?.selectedSchool]);
-
-  const syncTimeouts = useRef<Record<string, NodeJS.Timeout>>({});
-  const latestPayloads = useRef<Record<string, any>>({});
-  const latestTransactionData = useRef<Record<string, any>>({});
-  // Track active sync operations to prevent poller from overwriting local changes
-  const activeSyncCount = useRef<number>(0);
-
-  const enqueueSync = (syncId: string, syncFn: () => Promise<void>) => {
-    if (syncTimeouts.current[syncId]) {
-      clearTimeout(syncTimeouts.current[syncId]);
-    }
-    activeSyncCount.current++;
-    syncTimeouts.current[syncId] = setTimeout(async () => {
-      try {
-        await syncFn();
-      } catch (err) {
-        console.error("Delayed sync failed:", syncId, err);
-      } finally {
-        activeSyncCount.current = Math.max(0, activeSyncCount.current - 1);
-      }
-    }, 0); // 0ms delay for maximum immediacy to support instant multi-device syncing
-  };
 
   const updateData = async (
     newDataPayload: Partial<AppData>,
@@ -1723,71 +1332,14 @@ export const GlobalProvider: React.FC<{ children: React.ReactNode }> = ({
 
       const newData = processedNewData;
 
-      let isBlockedByReadOnly = currentUser.permissions?.readOnly;
+      const tryingToUpdateKeys = Object.keys(newData);
+      const isAllowedByReadOnlyPolicy = canUserModifyDataKey(
+        currentUser,
+        tryingToUpdateKeys
+      );
 
-      if (isBlockedByReadOnly) {
-        // Find if this specific update is allowed by a specific module's allowEdits
-        let canBypass = false;
-        const perms: any = currentUser.permissions || {};
-
-        // Define mapping of data keys to their parent permission key
-        const keyToModuleMap: Record<string, string[]> = {
-          secretariatStudents: ["secretariat"],
-          secretariatStaff: ["secretariat"],
-          timetable: ["secretariat"],
-          dailyReports: ["dailyFollowUp"],
-          adminReports: ["adminFollowUp"],
-          adminIndividualReports: ["adminFollowUp"],
-          studentReports: ["studentAffairs", "secretariat"], // Secretariat might update this implicitly
-          violations: ["studentAffairs"],
-          parentVisits: ["studentAffairs"],
-          teacherFollowUps: ["teacherPortal"],
-          selfEvaluations: ["teacherPortal"],
-          studentEvaluations: ["teacherPortal"],
-          dailyPreparations: ["teacherPortal"],
-          substitutions: ["substitutions"],
-          schoolProfile: ["schoolProfile"],
-          profile: ["schoolProfile"],
-          schoolBranches: ["schoolProfile"],
-          availableSchools: ["schoolProfile"], // Admins can manage this usually, but keep it mapped just in case
-          users: ["userManagement"],
-          taskReports: ["specialReports"],
-          absenceLogs: ["specialReports"],
-          studentLatenessLogs: ["specialReports"],
-          studentViolationLogs: ["specialReports"],
-          exitLogs: ["specialReports"],
-          damageLogs: ["specialReports"],
-          parentVisitLogs: ["specialReports"],
-          examLogs: ["specialReports"],
-          notebookFollowUpLogs: ["specialReports"],
-          notebookReportArchives: ["specialReports"],
-          transportBuses: ["specialReports"],
-          transportLogs: ["specialReports"],
-          transportDailyStatus: ["specialReports"],
-          financeRecords: ["specialReports"],
-          issues: ["issuesModal"],
-          trainingCourses: ["trainingCourses"],
-          caseStudies: ["caseStudyModal"],
-          comprehensiveIndicators: ["comprehensiveIndicators"],
-          taskTemplates: ["dashboard"],
-        };
-
-        const tryingToUpdateKeys = Object.keys(newData);
-        canBypass = tryingToUpdateKeys.every((key) => {
-          const modNames = keyToModuleMap[key] || [key];
-          return modNames.some((modName) => {
-            const modPerms = perms[modName];
-            return Array.isArray(modPerms) && modPerms.includes("allowEdits");
-          });
-        });
-
-        if (canBypass) {
-          isBlockedByReadOnly = false;
-        }
-      }
-
-      if (isBlockedByReadOnly) {
-        console.warn("ReadOnly permission: Update blocked");
+      if (!isAllowedByReadOnlyPolicy) {
+        console.warn("ReadOnly permission: Update blocked for keys:", tryingToUpdateKeys);
         toast.error(
           lang === "ar"
             ? "غير مسموح بتغيير البيانات للرتب الممنوحة لك (للقراءة فقط)"
@@ -2116,179 +1668,135 @@ export const GlobalProvider: React.FC<{ children: React.ReactNode }> = ({
                 ).filter(Boolean);
             }
 
-            // Update local state immediately for instant feedback *before* any network logic
-            if (key !== "profile" && key !== "profiles") {
-              if (
-                (key === "secretariatStaff" ||
+            // Stamp array items automatically with author and version metadata before saving
+            if (key !== "profile" && key !== "profiles" && key !== "availableSchools" && key !== "availableYears") {
+              if (Array.isArray(newData[key])) {
+                const oldArray = (rawData[key] as any[]) || [];
+                const stampedIncoming = stampArrayRecords(
+                  newData[key] as any[],
+                  oldArray,
+                  { id: currentUser.id, name: currentUser.name }
+                );
+
+                if (
+                  key === "secretariatStaff" ||
                   key === "secretariatStudents" ||
                   key === "customSupervisionCriteria" ||
-                  key === "teacherEvaluations") &&
-                Array.isArray(newData[key])
-              ) {
-                const oldArray = (rawData[key] as any[]) || [];
-                const newArray = (newData[key] as any[]) || [];
-                
-                const mergedMap = new Map();
-                oldArray.forEach((item) => {
-                  const id = item.id || item.uuid;
-                  if (id) mergedMap.set(id, item);
-                });
-                newArray.forEach((item) => {
-                  const id = item.id || item.uuid;
-                  if (id) mergedMap.set(id, item);
-                });
-                
-                // Remove items belonging to the target schools being updated if they are not in the new array
-                const newArrayIds = new Set(newArray.map(item => item.id || item.uuid));
-                oldArray.forEach((item) => {
-                  const id = item.id || item.uuid;
-                  const itemSchool = item.school || item.schoolId || "";
-                  if (schoolsToUpdate.includes(itemSchool.trim()) && !newArrayIds.has(id)) {
-                    mergedMap.delete(id);
-                  }
-                });
-                
-                const mergedArray = Array.from(mergedMap.values());
-                pendingChanges[key] = mergedArray as any;
-                newData[key] = mergedArray as any;
+                  key === "teacherEvaluations"
+                ) {
+                  const mergedMap = new Map();
+                  oldArray.forEach((item) => {
+                    const id = item.id || item.uuid;
+                    if (id) mergedMap.set(id, item);
+                  });
+                  stampedIncoming.forEach((item) => {
+                    const id = item.id || item.uuid;
+                    if (id) mergedMap.set(id, item);
+                  });
+
+                  const newArrayIds = new Set(stampedIncoming.map((item) => item.id || item.uuid));
+                  oldArray.forEach((item) => {
+                    const id = item.id || item.uuid;
+                    const itemSchool = item.school || item.schoolId || "";
+                    if (schoolsToUpdate.includes(itemSchool.trim()) && !newArrayIds.has(id)) {
+                      mergedMap.delete(id);
+                    }
+                  });
+
+                  const mergedArray = Array.from(mergedMap.values());
+                  pendingChanges[key] = mergedArray as any;
+                  newData[key] = mergedArray as any;
+                } else {
+                  pendingChanges[key] = stampedIncoming as any;
+                  newData[key] = stampedIncoming as any;
+                }
               } else {
                 pendingChanges[key] = newData[key] as any;
               }
+            } else if (key === "availableSchools" || key === "availableYears") {
+              pendingChanges[key] = newData[key] as any;
             }
 
-            // CRITICAL: availableSchools and availableYears are GLOBAL configs.
-            // They must ONLY be saved to system_configs via /sync/global,
-            // NOT to school_shared_data via /sync/school/${school}.
-            // Saving them to school_shared_data causes stale copies to overwrite
-            // the current state when fetchSyncData pulls school data.
             const globalOnlyKeys: string[] = ["availableSchools", "availableYears"];
-            
+
             if ((key as string) === "users") {
-              // Direct individual user synchronization methodology
               const newUsers = (newData.users || []) as any[];
               const oldUsers = (data.users || []) as any[];
               const newUserIds = newUsers.map((u) => u.id);
 
-              // 1. Detect and queue added/modified users
-              newUsers.forEach((u) => {
+              for (const u of newUsers) {
                 const oldU = oldUsers.find((ou) => ou.id === u.id);
                 if (!oldU || JSON.stringify(oldU) !== JSON.stringify(u)) {
-                  const syncId = `user_save_${u.id}`;
-                  latestPayloads.current[syncId] = u;
-                  enqueueSync(syncId, async () => {
-                    queueSyncRequest('/sync/user', latestPayloads.current[syncId], 'POST');
-                  });
+                  const stampedUser = stampRecord(
+                    u,
+                    { id: currentUser.id, name: currentUser.name },
+                    oldU
+                  );
+                  await localDB.users.put(stampedUser);
                 }
-              });
+              }
 
-              // 2. Detect and queue deleted users
-              // CRITICAL: Only delete users that belong to the target schools being updated.
-              // Without this guard, any page that calls updateData({ users: someSubset })
-              // would send DELETE requests for ALL users not in that subset, even users
-              // from other schools or newly-added users not yet reflected in the caller's data snapshot.
-              oldUsers.forEach((u) => {
+              for (const u of oldUsers) {
                 if (u && u.id && !newUserIds.includes(u.id)) {
-                  // Only delete if this user actually belongs to one of the schools being updated
                   const userSchools = u.schools || [];
-                  const belongsToTargetSchool = 
-                    u.role === 'admin' || 
+                  const belongsToTargetSchool =
+                    u.role === "admin" ||
                     u.permissions?.all === true ||
                     schoolsToUpdate.some((s) => userSchools.includes(s));
-                  
+
                   if (belongsToTargetSchool) {
-                    const syncId = `user_delete_${u.id}`;
-                    enqueueSync(syncId, async () => {
-                      queueSyncRequest(`/sync/user/${encodeURIComponent(u.id)}`, null, 'DELETE');
-                    });
+                    await localDB.users.delete(u.id);
                   }
                 }
-              });
+              }
             } else if (!globalOnlyKeys.includes(key as string)) {
-            schoolsToUpdateForThisKey.forEach((school) => {
-              const fullPath = `schools/${school}/shared/${key}`;
-              let payloadToSave = newData[key];
+              for (const school of schoolsToUpdateForThisKey) {
+                let payloadToSave = newData[key];
 
-              // Determine intended actions to prevent Array Overwrites
-              let isArrayWithIds = false;
-              let intendedUpdates = new Map();
-              let intendedDeletes = new Set();
-              
-              if (Array.isArray(payloadToSave) && Array.isArray(rawData[key as keyof AppData])) {
-                 const oldClientArray = rawData[key as keyof AppData] as any[];
-                 const hasIds = payloadToSave.length > 0 ? !!(payloadToSave[0].id || payloadToSave[0].uuid) : (oldClientArray.length > 0 ? !!(oldClientArray[0].id || oldClientArray[0].uuid) : false);
-                 
-                 if (hasIds) {
-                    isArrayWithIds = true;
-                    // For the debounced update, we merge changes locally before sending
-                    const newMap = new Map<string, any>(payloadToSave.map((i: any) => [i.id || i.uuid, i] as [string, any]));
-                    const oldMap = new Map<string, any>(oldClientArray.map(i => [i.id || i.uuid, i] as [string, any]));
-                    
-                    for (const [id, newItem] of newMap.entries()) {
-                       if (!id) continue;
-                       const oldItem = oldMap.get(id);
-                       if (!oldItem || JSON.stringify(oldItem) !== JSON.stringify(newItem)) {
-                          intendedUpdates.set(id, newItem);
-                       }
-                    }
-                    for (const id of oldMap.keys()) {
-                       if (!id) continue;
-                       if (!newMap.has(id)) {
-                          intendedDeletes.add(id);
-                       }
-                    }
-                 }
-              }
-
-              // Apply pre-filtering rules for multi-tenant isolation
-              const filterPayloadItem = (item: any) => {
-                 if ((key as string) === "users") {
-                    return (item.schools && item.schools.some((s: string) => s && (s.trim() === school.trim() || s.trim() === "all"))) ||
-                           item.role === "admin" ||
-                           item.permissions?.all === true;
-                 } else if (key === "secretariatStudents" || key === "secretariatStaff") {
-                    return (item.school && item.school.trim() === school.trim()) ||
-                           (item.schoolBranch && item.schoolBranch.startsWith(school));
-                 } else if (key === "customSupervisionCriteria") {
-                    return item.school === school.trim();
-                 } else if (key === "teacherEvaluations") {
+                const filterPayloadItem = (item: any) => {
+                  if (key === "secretariatStudents" || key === "secretariatStaff") {
+                    return (
+                      (item.school && hasIntersection([item.school], [school], normalizeSchool)) ||
+                      (item.schoolBranch && item.schoolBranch.startsWith(school))
+                    );
+                  } else if (key === "customSupervisionCriteria") {
+                    return item.school && hasIntersection([item.school], [school], normalizeSchool);
+                  } else if (key === "teacherEvaluations") {
                     return item.school && isSameSchool(item.school, school);
-                 }
-                 return true;
-              };
+                  }
+                  return true;
+                };
 
-              if (Array.isArray(payloadToSave) && (!isArrayWithIds || (key as string) === "users" || key === "secretariatStudents" || key === "secretariatStaff" || key === "customSupervisionCriteria" || key === "teacherEvaluations")) {
-                 payloadToSave = payloadToSave.filter(filterPayloadItem) as any;
-              }
+                if (
+                  Array.isArray(payloadToSave) &&
+                  (key === "secretariatStudents" ||
+                    key === "secretariatStaff" ||
+                    key === "customSupervisionCriteria" ||
+                    key === "teacherEvaluations")
+                ) {
+                  payloadToSave = payloadToSave.filter(filterPayloadItem) as any;
+                }
 
-              const syncId = `shared_${school}_${key}`;
-              latestPayloads.current[syncId] = payloadToSave;
-              enqueueSync(syncId, async () => {
-                const currentPayloadToSave = latestPayloads.current[syncId];
-                queueSyncRequest(`/sync/school/${encodeURIComponent(school)}`, {
-                  key: key,
-                  data: currentPayloadToSave,
-                });
-              });
-              if (key === "profile") {
-                pendingChanges.profiles = {
-                  ...(pendingChanges.profiles || data.profiles),
-                  [school]: newData[key],
-                } as any;
+                await saveSchoolSharedKeyToLocalDB(
+                  school,
+                  key as string,
+                  payloadToSave,
+                  { id: currentUser.id, name: currentUser.name }
+                );
+
+                if (key === "profile") {
+                  pendingChanges.profiles = {
+                    ...(pendingChanges.profiles || data.profiles),
+                    [school]: newData[key],
+                  } as any;
+                }
               }
-            });
-            } // end of globalOnlyKeys guard
+            }
 
             if (key === "availableSchools" || key === "availableYears") {
-               if (isAdminOrFull) {
-                 const syncId = `global_${key}`;
-                 latestPayloads.current[syncId] = newData[key];
-                 enqueueSync(syncId, async () => {
-                   queueSyncRequest('/sync/global', {
-                     key: key,
-                     data: latestPayloads.current[syncId],
-                   });
-                 });
-               }
+              if (isAdminOrFull) {
+                await saveSystemConfigToLocalDB(key as string, newData[key]);
+              }
             }
           }
           continue;
@@ -2308,10 +1816,7 @@ export const GlobalProvider: React.FC<{ children: React.ReactNode }> = ({
             currentUser.permissions?.all === true ||
             (key === "schoolBranches" && isSecretariatEnabled)
           ) {
-            queueSyncRequest('/sync/global', {
-              key: key,
-              data: newData[key],
-            });
+            await saveSystemConfigToLocalDB(key as string, newData[key]);
           }
           continue;
         }
@@ -2321,25 +1826,25 @@ export const GlobalProvider: React.FC<{ children: React.ReactNode }> = ({
           const isAdminOrFull =
             currentUser.role === "admin" ||
             currentUser.permissions?.all === true;
-  
-          schoolsToUpdate.forEach((school) => {
-            const syncId = `custom_${school}_${currentUser.id}_${key}`;
-            latestPayloads.current[syncId] = newData[key];
-            
-            enqueueSync(syncId, async () => {
-              if (isAdminOrFull) {
-                queueSyncRequest(`/sync/school/${encodeURIComponent(school)}`, {
-                  key: key,
-                  data: latestPayloads.current[syncId],
-                });
-              } else {
-                queueSyncRequest(`/sync/school/${encodeURIComponent(school)}/user/${encodeURIComponent(currentUser.id)}/data`, {
-                  key: key,
-                  items: latestPayloads.current[syncId],
-                });
-              }
-            });
-          });
+
+          for (const school of schoolsToUpdate) {
+            if (isAdminOrFull) {
+              await saveSchoolSharedKeyToLocalDB(
+                school,
+                key as string,
+                newData[key],
+                { id: currentUser.id, name: currentUser.name }
+              );
+            } else {
+              await saveUserCollectionToLocalDB(
+                school,
+                currentUser.id,
+                key as string,
+                newData[key],
+                { id: currentUser.id, name: currentUser.name }
+              );
+            }
+          }
           continue;
         }
 
@@ -2351,11 +1856,14 @@ export const GlobalProvider: React.FC<{ children: React.ReactNode }> = ({
 
         const oldArray = (rawData[key] as any[]) || [];
 
-        // Merge: keep items outside the current filter window, replace those inside.
         const itemsNotMatchingFilter = oldArray.filter(
           (item) => !matchesCurrentFilter(item, key),
         );
-        let finalArray = [...itemsNotMatchingFilter, ...newArray];
+        const stampedNewArray = stampArrayRecords(newArray, oldArray, {
+          id: currentUser.id,
+          name: currentUser.name,
+        });
+        let finalArray = [...itemsNotMatchingFilter, ...stampedNewArray];
         if (key === "dailyReports") {
           finalArray = normalizeDailyReports(finalArray);
         }
@@ -2373,27 +1881,9 @@ export const GlobalProvider: React.FC<{ children: React.ReactNode }> = ({
         }
 
         for (const uid of userIds) {
-          // Check if the items changed, independent of array ordering
           const userItems = finalArray.filter((item) => item.userId === uid);
-          const oldUserItems = oldArray.filter((item) => item.userId === uid);
-
-          const sortedUserItems = [...userItems].sort((a, b) =>
-            (a.id || "").localeCompare(b.id || ""),
-          );
-          const sortedOldUserItems = [...oldUserItems].sort((a, b) =>
-            (a.id || "").localeCompare(b.id || ""),
-          );
-
-          if (
-            JSON.stringify(sortedUserItems) ===
-            JSON.stringify(sortedOldUserItems)
-          ) {
-            continue; // No changes for this user, skip Firebase write
-          }
-
-          // Group by school
           const itemsBySchool: Record<string, any[]> = {};
-          schoolsToUpdate.forEach((s) => (itemsBySchool[s] = [])); // Initialize all with empty array
+          schoolsToUpdate.forEach((s) => (itemsBySchool[s] = []));
 
           userItems.forEach((item) => {
             let sId =
@@ -2409,302 +1899,160 @@ export const GlobalProvider: React.FC<{ children: React.ReactNode }> = ({
           });
 
           for (const sId of Object.keys(itemsBySchool)) {
-            const syncId = `user_${sId}_${uid}_${key}`;
-            latestPayloads.current[syncId] = itemsBySchool[sId];
-            
-            enqueueSync(syncId, async () => {
-              queueSyncRequest(`/sync/school/${encodeURIComponent(sId)}/user/${encodeURIComponent(uid)}/data`, {
-                key: key,
-                items: latestPayloads.current[syncId],
-              });
-            });
-          }
-        }
-      }
-
-      setData((prev) => {
-        const final = { ...prev, ...pendingChanges };
-        
-        return final;
-      });
-    } else {
-      // Fallback for non-authenticated or initial state
-      setData((prev) => {
-        const final = { ...prev, ...newDataPayload };
-        
-        return final;
-      });
-    }
-  };
-
-  
-
-  const checkSchoolsAndYears = async (username: string, code: string): Promise<{ schools: string[]; years: string[] }> => {
-    if (!navigator.onLine) {
-      const cached = localStorage.getItem('cached_app_data');
-      if (!cached) {
-        throw new Error("لا توجد بيانات محلية مسجلة مسبقاً. يرجى الاتصال بالشبكة أولاً.");
-      }
-      const parsed = JSON.parse(cached);
-      const matchedUser = (parsed.users || []).find(
-        (u: any) => u.name && u.name.trim().toLowerCase() === username.trim().toLowerCase()
-      );
-      
-      if (!matchedUser || matchedUser.code !== code) {
-        throw new Error("اسم المستخدم أو الكود غير صحيح محلياً.");
-      }
-      
-      let schools = matchedUser.schools || [];
-      let years = matchedUser.academicYears || [];
-      if (matchedUser.role === 'admin' || matchedUser.permissions?.all === true) {
-        schools = parsed.availableSchools || [];
-        years = parsed.availableYears || [];
-      }
-      return {
-        schools: schools.filter(Boolean),
-        years: years.filter(Boolean)
-      };
-    }
-
-    try {
-      const res = await api.post("/auth/check-schools-years", {
-        username: username,
-        code: code,
-      });
-      return res.data;
-    } catch (err: any) {
-      console.error("Credentials check failed online, checking offline fallback:", err);
-      const isNetworkError = !err.response || err.code === 'ERR_NETWORK' || err.message === 'Network Error';
-      if (isNetworkError) {
-        const cached = localStorage.getItem('cached_app_data');
-        if (cached) {
-          const parsed = JSON.parse(cached);
-          const matchedUser = (parsed.users || []).find(
-            (u: any) => u.name && u.name.trim().toLowerCase() === username.trim().toLowerCase()
-          );
-          if (matchedUser && matchedUser.code === code) {
-            let schools = matchedUser.schools || [];
-            let years = matchedUser.academicYears || [];
-            if (matchedUser.role === 'admin' || matchedUser.permissions?.all === true) {
-              schools = parsed.availableSchools || [];
-              years = parsed.availableYears || [];
-            }
-            return {
-              schools: schools.filter(Boolean),
-              years: years.filter(Boolean)
-            };
-          }
-        }
-      }
-      throw err;
-    }
-  };
-
-  const completeLogin = async (username: string, code: string, school: string, year: string, branch?: string): Promise<boolean> => {
-    if (!navigator.onLine) {
-      const cached = localStorage.getItem('cached_app_data');
-      if (!cached) {
-        throw new Error("لا توجد بيانات محلية مسجلة مسبقاً.");
-      }
-      const parsed = JSON.parse(cached);
-      const matchedUser = (parsed.users || []).find(
-        (u: any) => u.name && u.name.trim().toLowerCase() === username.trim().toLowerCase()
-      );
-
-      if (!matchedUser || matchedUser.code !== code) {
-        throw new Error("فشل التحقق من كود الدخول أوفلاين.");
-      }
-
-      let derivedBranch = branch ?? '';
-      if (!derivedBranch && matchedUser.permissions?.schoolsAndBranches) {
-        const selectedSchools = school.split(',');
-        const allBranches: string[] = [];
-        selectedSchools.forEach((sch: string) => {
-          const brList = matchedUser.permissions.schoolsAndBranches[sch];
-          if (Array.isArray(brList)) {
-            allBranches.push(...brList);
-          }
-        });
-        if (allBranches.length > 0) {
-          derivedBranch = Array.from(new Set(allBranches)).join(',');
-        }
-      }
-      if (!derivedBranch && (matchedUser.role === 'admin' || matchedUser.permissions?.all === true)) {
-        derivedBranch = 'all';
-      }
-
-      const mockAuthUser = {
-        id: matchedUser.id,
-        name: matchedUser.name,
-        jobTitle: matchedUser.jobTitle,
-        grades: matchedUser.grades || [],
-        sections: matchedUser.sections || [],
-        subjects: matchedUser.subjects || [],
-        schools: matchedUser.schools || [],
-        selectedSchool: school,
-        selectedYear: year,
-        selectedBranch: derivedBranch,
-        role: matchedUser.role,
-        permissions: matchedUser.permissions,
-        customSchoolProfiles: matchedUser.customSchoolProfiles,
-      };
-
-      const offlineToken = "offline_token_" + matchedUser.id;
-      localStorage.setItem("auth_token", offlineToken);
-      localStorage.setItem("selected_school", school);
-      localStorage.setItem("selected_year", year);
-      localStorage.setItem("selected_branch", derivedBranch);
-
-      if (currentUser?.id && currentUser.id !== mockAuthUser.id) {
-         setData({
-           ...defaultData,
-           users: parsed.users,
-           availableSchools: parsed.availableSchools,
-           availableYears: parsed.availableYears,
-           schoolBranches: parsed.schoolBranches,
-         });
-      } else {
-         setData(parsed);
-      }
-
-      setIsAuthenticated(true);
-      setCurrentUser(mockAuthUser);
-      toast.success("تم تسجيل الدخول بنجاح (بدون اتصال)");
-      return true;
-    }
-
-    try {
-      const res = await api.post("/login", {
-        username: username,
-        code: code,
-        school: school,
-        year: year,
-        branch: branch,
-      });
-
-      const { token, user: authUser } = res.data;
-      localStorage.setItem("auth_token", token);
-      localStorage.setItem("selected_school", school);
-      localStorage.setItem("selected_year", year);
-      localStorage.setItem("selected_branch", authUser.selectedBranch);
-
-      if (currentUser?.id && currentUser.id !== authUser.id) {
-         setData((prev) => ({
-           ...defaultData,
-           users: [],
-           secretariatStaff: [],
-           availableSchools: prev.availableSchools,
-           availableYears: prev.availableYears,
-           schoolBranches: prev.schoolBranches,
-         }));
-      }
-
-      setIsAuthenticated(true);
-      setCurrentUser(authUser);
-      toast.success("تم تسجيل الدخول بنجاح");
-      return true;
-    } catch (err: any) {
-      console.error("Login failed online, checking network glitch for offline fallback:", err);
-      const isNetworkError = !err.response || err.code === 'ERR_NETWORK' || err.message === 'Network Error';
-      if (isNetworkError) {
-        const cached = localStorage.getItem('cached_app_data');
-        if (cached) {
-          try {
-            const parsed = JSON.parse(cached);
-            const matchedUser = (parsed.users || []).find(
-              (u: any) => u.name && u.name.trim().toLowerCase() === username.trim().toLowerCase()
+            await saveUserCollectionToLocalDB(
+              sId,
+              uid,
+              key as string,
+              itemsBySchool[sId],
+              { id: currentUser.id, name: currentUser.name }
             );
-            if (matchedUser && matchedUser.code === code) {
-              let derivedBranch = branch ?? '';
-              if (!derivedBranch && matchedUser.permissions?.schoolsAndBranches) {
-                const selectedSchools = school.split(',');
-                const allBranches: string[] = [];
-                selectedSchools.forEach((sch: string) => {
-                  const brList = matchedUser.permissions.schoolsAndBranches[sch];
-                  if (Array.isArray(brList)) {
-                    allBranches.push(...brList);
-                  }
-                });
-                if (allBranches.length > 0) {
-                  derivedBranch = Array.from(new Set(allBranches)).join(',');
-                }
-              }
-              if (!derivedBranch && (matchedUser.role === 'admin' || matchedUser.permissions?.all === true)) {
-                derivedBranch = 'all';
-              }
-
-              const mockAuthUser = {
-                id: matchedUser.id,
-                name: matchedUser.name,
-                jobTitle: matchedUser.jobTitle,
-                grades: matchedUser.grades || [],
-                sections: matchedUser.sections || [],
-                subjects: matchedUser.subjects || [],
-                schools: matchedUser.schools || [],
-                selectedSchool: school,
-                selectedYear: year,
-                selectedBranch: derivedBranch,
-                role: matchedUser.role,
-                permissions: matchedUser.permissions,
-                customSchoolProfiles: matchedUser.customSchoolProfiles,
-              };
-
-              const offlineToken = "offline_token_" + matchedUser.id;
-              localStorage.setItem("auth_token", offlineToken);
-              localStorage.setItem("selected_school", school);
-              localStorage.setItem("selected_year", year);
-              localStorage.setItem("selected_branch", derivedBranch);
-
-              if (currentUser?.id && currentUser.id !== mockAuthUser.id) {
-                setData({
-                  ...defaultData,
-                  users: parsed.users,
-                  availableSchools: parsed.availableSchools,
-                  availableYears: parsed.availableYears,
-                  schoolBranches: parsed.schoolBranches,
-                });
-              } else {
-                setData(parsed);
-              }
-
-              setIsAuthenticated(true);
-              setCurrentUser(mockAuthUser);
-              toast.success("تم تسجيل الدخول بنجاح (بدون اتصال)");
-              return true;
-            }
-          } catch (e) {
-            console.error("Failed offline login fallback parse:", e);
           }
         }
       }
-      const errMsg = err.response?.data?.message || err.message;
-      toast.error("فشل تسجيل الدخول: " + errMsg);
-      throw err;
+
+      setData((prev) => ({
+        ...prev,
+        ...pendingChanges,
+      }));
+    } else {
+      setData((prev) => ({
+        ...prev,
+        ...newDataPayload,
+      }));
     }
+  };
+
+  const checkSchoolsAndYears = async (
+    username: string,
+    code: string
+  ): Promise<{ schools: string[]; years: string[] }> => {
+    await ensureSeedDatabase();
+
+    const allUsers = await localDB.users.toArray();
+    const matchedUser = allUsers.find(
+      (u: any) =>
+        u.name &&
+        normalizeArabicText(u.name) === normalizeArabicText(username) &&
+        String(u.code).trim() === String(code).trim()
+    );
+
+    if (!matchedUser) {
+      throw new Error("اسم المستخدم أو كود الدخول غير صحيح.");
+    }
+
+    const schoolsCfg = await localDB.systemConfigs.get("availableSchools");
+    const yearsCfg = await localDB.systemConfigs.get("availableYears");
+    const globalSchools: string[] = Array.isArray(schoolsCfg?.data) && schoolsCfg.data.length > 0
+      ? schoolsCfg.data
+      : ["المدرسة الافتراضية"];
+    const globalYears: string[] = Array.isArray(yearsCfg?.data) && yearsCfg.data.length > 0
+      ? yearsCfg.data
+      : ["2024-2025"];
+
+    let schools = Array.isArray(matchedUser.schools) ? matchedUser.schools.filter(Boolean) : [];
+    let years = Array.isArray(matchedUser.academicYears) ? matchedUser.academicYears.filter(Boolean) : [];
+
+    if (matchedUser.role === "admin" || matchedUser.permissions?.all === true) {
+      schools = Array.from(new Set([...globalSchools, ...schools])).filter(Boolean);
+      years = Array.from(new Set([...globalYears, ...years])).filter(Boolean);
+    } else {
+      if (schools.length === 0) schools = globalSchools;
+      if (years.length === 0) years = globalYears;
+    }
+
+    return {
+      schools,
+      years,
+    };
+  };
+
+  const completeLogin = async (
+    username: string,
+    code: string,
+    school: string,
+    year: string,
+    branch?: string
+  ): Promise<boolean> => {
+    await ensureSeedDatabase();
+
+    const allUsers = await localDB.users.toArray();
+    const matchedUser = allUsers.find(
+      (u: any) =>
+        u.name &&
+        normalizeArabicText(u.name) === normalizeArabicText(username) &&
+        String(u.code).trim() === String(code).trim()
+    );
+
+    if (!matchedUser) {
+      toast.error("اسم المستخدم أو كود الدخول غير صحيح.");
+      throw new Error("اسم المستخدم أو كود الدخول غير صحيح.");
+    }
+
+    let derivedBranch = branch ?? "";
+    if (!derivedBranch && matchedUser.permissions?.schoolsAndBranches) {
+      const selectedSchools = school.split(",").map((s) => s.trim());
+      const allBranches: string[] = [];
+      selectedSchools.forEach((sch: string) => {
+        const brList = matchedUser.permissions?.schoolsAndBranches?.[sch];
+        if (Array.isArray(brList)) {
+          allBranches.push(...brList);
+        }
+      });
+      if (allBranches.length > 0) {
+        derivedBranch = Array.from(new Set(allBranches)).join(",");
+      }
+    }
+    if (!derivedBranch && (matchedUser.role === "admin" || matchedUser.permissions?.all === true)) {
+      derivedBranch = "all";
+    }
+
+    const authUser: AuthUser = {
+      id: matchedUser.id,
+      name: matchedUser.name,
+      jobTitle: matchedUser.jobTitle,
+      grades: matchedUser.grades || [],
+      sections: matchedUser.sections || [],
+      subjects: matchedUser.subjects || [],
+      schools: matchedUser.schools || [],
+      selectedSchool: school,
+      selectedYear: year,
+      selectedBranch: derivedBranch,
+      role: matchedUser.role,
+      permissions: matchedUser.permissions,
+      customSchoolProfiles: matchedUser.customSchoolProfiles,
+    };
+
+    const localToken = "local_session_" + matchedUser.id;
+    localStorage.setItem("auth_token", localToken);
+    localStorage.setItem("selected_school", school);
+    localStorage.setItem("selected_year", year);
+    localStorage.setItem("selected_branch", derivedBranch);
+    localStorage.setItem("cached_auth_user", JSON.stringify(authUser));
+
+    const loadedData = await loadFullAppDataFromLocalDB(defaultData, school, matchedUser.id);
+    if (loadedData.dailyReports && Array.isArray(loadedData.dailyReports)) {
+      loadedData.dailyReports = normalizeDailyReports(loadedData.dailyReports);
+    }
+
+    setData(loadedData);
+    setCurrentUser(authUser);
+    setIsAuthenticated(true);
+    toast.success("تم تسجيل الدخول بنجاح");
+    return true;
   };
 
   const logout = async () => {
-    try {
-      await api.post("/logout");
-    } catch (err) {
-      console.warn("Logout request failed:", err);
-    }
     localStorage.removeItem("auth_token");
     localStorage.removeItem("selected_school");
     localStorage.removeItem("selected_year");
     localStorage.removeItem("selected_branch");
     localStorage.removeItem("cached_auth_user");
-    
+
     setIsAuthenticated(false);
     setCurrentUser(null);
-    setData((prev) => ({
-      ...defaultData,
-      users: [],
-      secretariatStaff: [],
-      availableSchools: prev.availableSchools,
-      availableYears: prev.availableYears,
-      schoolBranches: prev.schoolBranches,
-    }));
+
+    const basicData = await loadFullAppDataFromLocalDB(defaultData);
+    setData(basicData);
   };
 
   const handleSetLang = (l: Language) => {
@@ -2850,6 +2198,10 @@ export const GlobalProvider: React.FC<{ children: React.ReactNode }> = ({
         queueSyncRequest,
         getReportMessageFooter,
         shareViaWhatsApp,
+        isEntityVisible,
+        canUserEdit,
+        isReadOnlyModule,
+        supervisorTeachers,
       }}
     >
       {children}

@@ -71,10 +71,10 @@ const IntroPage: React.FC<IntroPageProps> = ({ onEnter, onAbout }) => {
               <Bot className="text-blue-600" size={32} />
               <div className="flex flex-col items-center justify-center">
                 <span className="font-black text-2xl text-slate-800 leading-none">
-                  رفيقك
+                  رفيقك المدرسي
                 </span>
                 <span className="text-[10px] font-bold text-slate-500 uppercase tracking-widest leading-none mt-1">
-                  Al-Taqareer
+                  Rafiquk School
                 </span>
               </div>
               <PenTool className="text-teal-600" size={28} />
@@ -90,7 +90,7 @@ const IntroPage: React.FC<IntroPageProps> = ({ onEnter, onAbout }) => {
           className="text-center space-y-4 mb-16"
         >
           <h1 className="text-3xl md:text-5xl font-black text-transparent bg-clip-text bg-gradient-to-l from-blue-700 to-teal-600 leading-normal pb-2">
-            مرحباً بك في نظام رفيقك في كتابة التقارير
+            مرحباً بك في نظام رفيقك المدرسي
           </h1>
           <p className="text-lg md:text-xl font-bold text-slate-700 max-w-3xl mx-auto leading-relaxed">
             نسعد كثيراً بخدمتكم والارتقاء معكم إلى أفضل المستويات من خلال

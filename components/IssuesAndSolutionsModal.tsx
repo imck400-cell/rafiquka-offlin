@@ -10,7 +10,8 @@ import {
   User,
   Clock,
 } from "lucide-react";
-import api from "../src/lib/api";
+import { localDB } from "../src/lib/localDB";
+import { stampRecord } from "../src/lib/recordStamping";
 import { useGlobal } from "../context/GlobalState";
 
 interface ModalProps {
@@ -99,23 +100,11 @@ const IssuesAndSolutionsModal: React.FC<ModalProps> = ({ isOpen, onClose }) => {
     if (isOpen && activeTab === "view") {
       const fetchLogs = async () => {
         setIsLoading(true);
-        const cacheKey = 'cached_standalone_issuesAndSolutions_log';
         try {
-          const res = await api.get('/sync/standalone/issuesAndSolutions_log');
-          const docs = res.data;
-          localStorage.setItem(cacheKey, JSON.stringify(docs || []));
-
-          processDocs(docs);
+          const docs = await localDB.issuesAndSolutions.toArray();
+          processDocs(docs || []);
         } catch (err) {
-          console.error("Error fetching issues: ", err);
-          const cached = localStorage.getItem(cacheKey);
-          if (cached) {
-            try {
-              processDocs(JSON.parse(cached));
-            } catch (e) {
-              console.error("Error parsing cached issues:", e);
-            }
-          }
+          console.error("Error fetching issues from localDB: ", err);
         } finally {
           setIsLoading(false);
         }
@@ -123,7 +112,7 @@ const IssuesAndSolutionsModal: React.FC<ModalProps> = ({ isOpen, onClose }) => {
 
       const processDocs = (docs: any[]) => {
         // Sort by timestamp desc
-        docs.sort((a: any, b: any) => new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime());
+        docs.sort((a: any, b: any) => new Date(b.timestamp || b.createdAt || 0).getTime() - new Date(a.timestamp || a.createdAt || 0).getTime());
 
         // Filter by school in JS
         const schoolDocs = docs.filter(
@@ -151,42 +140,18 @@ const IssuesAndSolutionsModal: React.FC<ModalProps> = ({ isOpen, onClose }) => {
       };
 
       fetchLogs();
-      const interval = setInterval(fetchLogs, 15000);
-      return () => clearInterval(interval);
     }
   }, [isOpen, activeTab, currentUser]);
 
   const handleDelete = async (id: string) => {
-    if (id.startsWith("local_")) {
-      setIssuesRecord((prev) => prev.filter((r) => r.id !== id));
-      const cacheKey = 'cached_standalone_issuesAndSolutions_log';
-      const localCache = localStorage.getItem(cacheKey);
-      if (localCache) {
-        const list = JSON.parse(localCache).filter((r: any) => r.id !== id);
-        localStorage.setItem(cacheKey, JSON.stringify(list));
-      }
-      return;
-    }
-
     if (!window.confirm("هل أنت متأكد من حذف هذا التقرير؟")) return;
 
-    // Optimistically update local cache & state
     setIssuesRecord((prev) => prev.filter((r) => r.id !== id));
-    const cacheKey = 'cached_standalone_issuesAndSolutions_log';
-    const localCache = localStorage.getItem(cacheKey);
-    if (localCache) {
-      const list = JSON.parse(localCache).filter((r: any) => r.id !== id);
-      localStorage.setItem(cacheKey, JSON.stringify(list));
-    }
 
     try {
-      await api.delete(`/sync/standalone/issuesAndSolutions_log/${id}`);
+      await localDB.issuesAndSolutions.delete(id);
     } catch (err: any) {
-      console.error("Error deleting document: ", err);
-      const isNetworkError = !err.response || err.code === 'ERR_NETWORK' || err.message === 'Network Error';
-      if (isNetworkError) {
-        queueSyncRequest(`/sync/standalone/issuesAndSolutions_log/${id}`, null, 'DELETE');
-      }
+      console.error("Error deleting document from localDB: ", err);
     }
   };
 
@@ -212,15 +177,13 @@ const IssuesAndSolutionsModal: React.FC<ModalProps> = ({ isOpen, onClose }) => {
     };
 
     try {
-      await api.post('/sync/standalone/issuesAndSolutions_log', payload);
-      setSuccessMessage("تم حفظ التقرير بنجاح، ومزامنته سحابياً!");
-
-      // Update local cache
-      const cacheKey = 'cached_standalone_issuesAndSolutions_log';
-      const localCache = localStorage.getItem(cacheKey);
-      const list = localCache ? JSON.parse(localCache) : [];
-      list.push(payload);
-      localStorage.setItem(cacheKey, JSON.stringify(list));
+      const stamped = stampRecord(payload, {
+        id: currentUser?.id,
+        name: currentUser?.name,
+      });
+      await localDB.issuesAndSolutions.put(stamped);
+      setIssuesRecord((prev) => [stamped, ...prev]);
+      setSuccessMessage("تم حفظ التقرير محلياً بنجاح!");
 
       setTimeout(() => {
         setSuccessMessage("");
@@ -230,36 +193,8 @@ const IssuesAndSolutionsModal: React.FC<ModalProps> = ({ isOpen, onClose }) => {
         setAdditionalDetails("");
       }, 2000);
     } catch (err: any) {
-      console.error("Error saving document: ", err);
-      const isNetworkError = !err.response || err.code === 'ERR_NETWORK' || err.message === 'Network Error';
-      if (isNetworkError) {
-        const localId = "local_" + Math.random().toString(36).substring(2, 9);
-        const localPayload = { ...payload, id: localId };
-
-        // Save to local cache
-        const cacheKey = 'cached_standalone_issuesAndSolutions_log';
-        const localCache = localStorage.getItem(cacheKey);
-        const list = localCache ? JSON.parse(localCache) : [];
-        list.push(localPayload);
-        localStorage.setItem(cacheKey, JSON.stringify(list));
-
-        // Update state
-        setIssuesRecord((prev) => [localPayload, ...prev]);
-
-        // Queue sync request
-        queueSyncRequest('/sync/standalone/issuesAndSolutions_log', payload);
-
-        setSuccessMessage("تم حفظ التقرير محلياً، وسيتم مزامنته عند الاتصال بالإنترنت.");
-        setTimeout(() => {
-          setSuccessMessage("");
-          setCategory("");
-          setProblem("");
-          setSolution("");
-          setAdditionalDetails("");
-        }, 2000);
-      } else {
-        setError("حدث خطأ أثناء حفظ التقرير. يرجى المحاولة مرة أخرى.");
-      }
+      console.error("Error saving document to localDB: ", err);
+      setError("حدث خطأ أثناء حفظ التقرير. يرجى المحاولة مرة أخرى.");
     } finally {
       setIsSubmitting(false);
     }

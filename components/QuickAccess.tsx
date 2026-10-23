@@ -122,10 +122,13 @@ const ALL_ACTIONS = [
   },
 ];
 
-import api from "../src/lib/api";
+import {
+  getUserCollectionFromLocalDB,
+  saveUserCollectionToLocalDB,
+} from "../src/lib/localDB";
 
 export const useQuickAccess = (userId?: string) => {
-  const { currentUser, queueSyncRequest } = useGlobal();
+  const { currentUser } = useGlobal();
   const [pinned, setPinned] = useState<string[]>([]);
   const [recent, setRecent] = useState<string[]>([]);
   const [usage, setUsage] = useState<Record<string, number>>({});
@@ -137,27 +140,31 @@ export const useQuickAccess = (userId?: string) => {
 
     const fetchPrefs = async () => {
       try {
-        const res = await api.get(`/sync/school/${encodeURIComponent(school)}/user/${encodeURIComponent(userId)}/data`);
-        const fetchedData = res.data.quickAccess;
+        const fetchedData = await getUserCollectionFromLocalDB(
+          school,
+          userId,
+          "quickAccess"
+        );
         if (fetchedData) {
           localStorage.setItem(cacheKey, JSON.stringify(fetchedData));
           setPinned(Array.isArray(fetchedData.pinned) ? fetchedData.pinned : []);
           setRecent(Array.isArray(fetchedData.recent) ? fetchedData.recent : []);
           setUsage(typeof fetchedData.usage === "object" ? fetchedData.usage : {});
+          return;
         }
       } catch (e) {
-        console.error("Failed to fetch quick access prefs:", e);
-        // Fallback to cache
-        const localPrefs = localStorage.getItem(cacheKey);
-        if (localPrefs) {
-          try {
-            const parsed = JSON.parse(localPrefs);
-            setPinned(Array.isArray(parsed.pinned) ? parsed.pinned : []);
-            setRecent(Array.isArray(parsed.recent) ? parsed.recent : []);
-            setUsage(typeof parsed.usage === "object" ? parsed.usage : {});
-          } catch (err) {
-            console.error("Failed to parse cached quick access prefs:", err);
-          }
+        console.error("Failed to fetch quick access prefs from localDB:", e);
+      }
+
+      const localPrefs = localStorage.getItem(cacheKey);
+      if (localPrefs) {
+        try {
+          const parsed = JSON.parse(localPrefs);
+          setPinned(Array.isArray(parsed.pinned) ? parsed.pinned : []);
+          setRecent(Array.isArray(parsed.recent) ? parsed.recent : []);
+          setUsage(typeof parsed.usage === "object" ? parsed.usage : {});
+        } catch (err) {
+          console.error("Failed to parse cached quick access prefs:", err);
         }
       }
     };
@@ -170,23 +177,18 @@ export const useQuickAccess = (userId?: string) => {
     const cacheKey = `cached_quick_access_${school}_${userId}`;
     const cachedData = { pinned: p, recent: r, usage: u };
 
-    // Update cache immediately
     localStorage.setItem(cacheKey, JSON.stringify(cachedData));
-    
+
     try {
-      await api.post(`/sync/school/${encodeURIComponent(school)}/user/${encodeURIComponent(userId)}/data`, {
-        key: "quickAccess",
-        items: cachedData as any
-      });
-    } catch (e: any) {
-      console.error("Failed to save quick access prefs", e);
-      const isNetworkError = !e.response || e.code === 'ERR_NETWORK' || e.message === 'Network Error';
-      if (isNetworkError) {
-        queueSyncRequest(`/sync/school/${encodeURIComponent(school)}/user/${encodeURIComponent(userId)}/data`, {
-          key: "quickAccess",
-          items: cachedData as any
-        });
-      }
+      await saveUserCollectionToLocalDB(
+        school,
+        userId,
+        "quickAccess",
+        cachedData,
+        { id: currentUser.id, name: currentUser.name }
+      );
+    } catch (e) {
+      console.error("Failed to save quick access prefs to localDB:", e);
     }
   };
 

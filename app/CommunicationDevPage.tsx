@@ -35,7 +35,7 @@ import { motion, AnimatePresence } from "framer-motion";
 import { CommunicationPost, SchoolHomework } from "../types";
 import { exportToStyledExcel, toHijri } from "../src/lib/excelExport";
 import { toast } from "sonner";
-import api from "../src/lib/api";
+import { saveSchoolSharedKeyToLocalDB } from "../src/lib/localDB";
 
 // دالة تفتيش ومطابقة الأسماء العربية بمرونة لتلافي الأخطاء الإملائية الشائعة
 const normalizeArabicText = (text: string): string => {
@@ -83,25 +83,21 @@ export default function CommunicationDevPage() {
   const [filterPeriod, setFilterPeriod] = useState("");
   const [showArchivedOnly, setShowArchivedOnly] = useState(false);
 
-  // دالة مزامنة متزامنة لضمان الحفظ في السيرفر أولاً
+  // دالة حفظ محلي فوري في قاعدة البيانات المحلية (localDB) وتحديث الحالة
   const syncWithServer = async (key: "communicationPosts" | "schoolHomeworks", updatedDataArray: any[]) => {
-    const school = currentUser?.selectedSchool?.split(",")[0]?.trim() || data.profile?.schoolName || "الكل";
+    const school = currentUser?.selectedSchool?.split(",")[0]?.trim() || data.profile?.schoolName || "المدرسة الافتراضية";
     try {
-      await api.post(`/sync/school/${encodeURIComponent(school)}`, {
+      await saveSchoolSharedKeyToLocalDB(
+        school,
         key,
-        data: updatedDataArray
-      });
-      // تحديث الحالة المحلية والكاش فقط بعد نجاح الحفظ على السيرفر
+        updatedDataArray,
+        { id: currentUser?.id, name: currentUser?.name }
+      );
       updateData({ [key]: updatedDataArray });
       return true;
     } catch (error: any) {
-      console.error("Failed to sync shared data with server:", error);
-      const serverMessage = error.response?.data?.message;
-      if (serverMessage) {
-        toast.error(`⚠️ ${serverMessage}`);
-      } else {
-        toast.error("⚠️ حدث خطأ أثناء حفظ البيانات في السيرفر. لم يتم الحفظ محلياً.");
-      }
+      console.error("Failed to save communication data to localDB:", error);
+      toast.error("⚠️ حدث خطأ أثناء حفظ البيانات محلياً.");
       throw error;
     }
   };

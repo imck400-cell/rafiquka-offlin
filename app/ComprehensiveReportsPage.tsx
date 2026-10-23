@@ -32,7 +32,7 @@ import {
 } from "lucide-react";
 import { toast } from "sonner";
 import ExcelJS from "exceljs";
-import api from "../src/lib/api";
+import { localDB } from "../src/lib/localDB";
 import { saveAs } from "file-saver";
 import {
   exportToStyledExcel,
@@ -614,57 +614,20 @@ const StudentReportsView: React.FC<SubPageProps> = ({ data, isSuperAdmin, userSc
 
   useEffect(() => {
     if (queryTriggered) {
-      const cachedCS = localStorage.getItem('cached_standalone_CaseStudies');
-      const cachedGS = localStorage.getItem('cached_standalone_GradeSheets');
-      const cachedSGS = localStorage.getItem('cached_standalone_StudentGradeSheets');
+      localDB.caseStudies
+        .toArray()
+        .then((rows) => setCaseStudyLogs(rows || []))
+        .catch((err) => console.error("Error fetching case studies from localDB:", err));
 
-      api.get("/sync/standalone/CaseStudies")
-        .then(res => {
-          localStorage.setItem('cached_standalone_CaseStudies', JSON.stringify(res.data || []));
-          setCaseStudyLogs(res.data || []);
-        })
-        .catch(err => {
-          console.error("Error fetching case studies:", err);
-          if (cachedCS) {
-            try {
-              setCaseStudyLogs(JSON.parse(cachedCS));
-            } catch (e) {
-              console.error("Failed to parse cached case studies:", e);
-            }
-          }
-        });
+      localDB.gradeSheets
+        .toArray()
+        .then((rows) => setGradeSheets(rows || []))
+        .catch((err) => console.error("Error fetching grade sheets from localDB:", err));
 
-      api.get("/sync/standalone/GradeSheets")
-        .then(res => {
-          localStorage.setItem('cached_standalone_GradeSheets', JSON.stringify(res.data || []));
-          setGradeSheets(res.data || []);
-        })
-        .catch(err => {
-          console.error("Error fetching grade sheets:", err);
-          if (cachedGS) {
-            try {
-              setGradeSheets(JSON.parse(cachedGS));
-            } catch (e) {
-              console.error("Failed to parse cached grade sheets:", e);
-            }
-          }
-        });
-
-      api.get("/sync/standalone/StudentGradeSheets")
-        .then(res => {
-          localStorage.setItem('cached_standalone_StudentGradeSheets', JSON.stringify(res.data || []));
-          setStudentSheets(res.data || []);
-        })
-        .catch(err => {
-          console.error("Error fetching student grade sheets:", err);
-          if (cachedSGS) {
-            try {
-              setStudentSheets(JSON.parse(cachedSGS));
-            } catch (e) {
-              console.error("Failed to parse cached student grade sheets:", e);
-            }
-          }
-        });
+      localDB.studentGradeSheets
+        .toArray()
+        .then((rows) => setStudentSheets(rows || []))
+        .catch((err) => console.error("Error fetching student grade sheets from localDB:", err));
     }
   }, [queryTriggered]);
 
@@ -5628,21 +5591,13 @@ const StatisticalReportsView: React.FC<StatisticalReportsViewProps> = ({
   useEffect(() => {
     if (queryTriggered) {
       setLoadingGrades(true);
-      const cachedGS = localStorage.getItem('cached_standalone_GradeSheets');
-      if (cachedGS) {
-        try {
-          setGradeSheets(JSON.parse(cachedGS));
-        } catch (e) {
-          console.error("Failed to parse cached grade sheets:", e);
-        }
-      }
-      api.get("/sync/standalone/GradeSheets")
-        .then(res => {
-          localStorage.setItem('cached_standalone_GradeSheets', JSON.stringify(res.data || []));
-          setGradeSheets(res.data || []);
+      localDB.gradeSheets
+        .toArray()
+        .then((rows) => {
+          setGradeSheets(rows || []);
         })
-        .catch(err => {
-          console.error("Error fetching grade sheets in stats view:", err);
+        .catch((err) => {
+          console.error("Error fetching grade sheets in stats view from localDB:", err);
         })
         .finally(() => {
           setLoadingGrades(false);

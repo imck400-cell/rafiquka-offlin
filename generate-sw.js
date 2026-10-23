@@ -63,11 +63,6 @@ try {
 
   fs.writeFileSync(swFile, swContent, 'utf8');
   console.log('Successfully updated dist/sw.js with asset list!');
-
-  // Generate version.json for runtime freshness checks
-  const versionFile = path.join(distDir, 'version.json');
-  fs.writeFileSync(versionFile, JSON.stringify({ v: timestamp }), 'utf8');
-  console.log(`Generated version.json with build version: ${timestamp}`);
 } catch (error) {
   console.error('Error generating sw.js assets:', error);
   process.exit(1);

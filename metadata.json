@@ -1,5 +1,8 @@
 {
-  "name": "2.2.3 Rafiquk - Administrative Supervision System",
-  "description": "A digital transformation of school administrative and educational supervision logbooks into an interactive, bilingual web application.",
-  "requestFramePermissions": []
+  "name": "رفيقك المدرسي - Rafiquk School",
+  "description": "النظام الإداري والتربوي المدرسي المتكامل يعمل أوف لاين بالكامل مع ميزة تبادل حزم البيانات الذكية.",
+  "requestFramePermissions": [],
+  "majorCapabilities": [
+    "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"
+  ]
 }

@@ -18,7 +18,8 @@ import {
   TrendingUp,
   Briefcase,
 } from "lucide-react";
-import api from "../src/lib/api";
+import { localDB } from "../src/lib/localDB";
+import { stampRecord } from "../src/lib/recordStamping";
 import * as XLSX from "xlsx";
 import { StudentReport } from "../types";
 
@@ -161,23 +162,11 @@ const CaseStudyModal: React.FC<ModalProps> = ({ isOpen, onClose }) => {
     if (activeTab === "view" && isOpen) {
       const fetchLogs = async () => {
         setIsLoadingLogs(true);
-        const cacheKey = 'cached_standalone_CaseStudies';
         try {
-          const res = await api.get("/sync/standalone/CaseStudies");
-          const fetchedLogs = res.data;
-          localStorage.setItem(cacheKey, JSON.stringify(fetchedLogs || []));
-
-          processLogs(fetchedLogs);
+          const fetchedLogs = await localDB.caseStudies.toArray();
+          processLogs(fetchedLogs || []);
         } catch (err) {
-          console.error("Error fetching case studies", err);
-          const cached = localStorage.getItem(cacheKey);
-          if (cached) {
-            try {
-              processLogs(JSON.parse(cached));
-            } catch (e) {
-              console.error("Error parsing cached case studies:", e);
-            }
-          }
+          console.error("Error fetching case studies from localDB", err);
         } finally {
           setIsLoadingLogs(false);
         }
@@ -579,15 +568,13 @@ const CaseStudyModal: React.FC<ModalProps> = ({ isOpen, onClose }) => {
     };
 
     try {
-      await api.post("/sync/standalone/CaseStudies", payload);
-      setSaveStatus({ type: "success", message: "تم حفظ التقرير بنجاح" });
-
-      // Cache the successful POST payload
-      const cacheKey = 'cached_standalone_CaseStudies';
-      const cached = localStorage.getItem(cacheKey);
-      const list = cached ? JSON.parse(cached) : [];
-      list.push(payload);
-      localStorage.setItem(cacheKey, JSON.stringify(list));
+      const stamped = stampRecord(payload, {
+        id: currentUser?.id,
+        name: currentUser?.name,
+      });
+      await localDB.caseStudies.put(stamped);
+      setLogs((prev) => [stamped, ...prev]);
+      setSaveStatus({ type: "success", message: "تم حفظ التقرير محلياً بنجاح" });
 
       setTimeout(() => {
         setSaveStatus({ type: "", message: "" });
@@ -600,79 +587,25 @@ const CaseStudyModal: React.FC<ModalProps> = ({ isOpen, onClose }) => {
       }, 2000);
     } catch (err: any) {
       console.error(err);
-      const isNetworkError = !err.response || err.code === 'ERR_NETWORK' || err.message === 'Network Error';
-      if (isNetworkError) {
-        const localId = "local_" + Math.random().toString(36).substring(2, 9);
-        const localPayload = { ...payload, id: localId };
-
-        // Save to cache
-        const cacheKey = 'cached_standalone_CaseStudies';
-        const cached = localStorage.getItem(cacheKey);
-        const list = cached ? JSON.parse(cached) : [];
-        list.push(localPayload);
-        localStorage.setItem(cacheKey, JSON.stringify(list));
-
-        // Update state
-        setLogs((prev) => [localPayload, ...prev]);
-
-        // Queue sync request
-        queueSyncRequest("/sync/standalone/CaseStudies", payload);
-
-        setSaveStatus({ type: "success", message: "تم حفظ التقرير محلياً، وسيتم مزامنته عند الاتصال بالإنترنت." });
-
-        setTimeout(() => {
-          setSaveStatus({ type: "", message: "" });
-          setSearchQuery("");
-          setSelectedStudent(null);
-          setEvaluatorRole("");
-          setSelectedSubject("");
-          setFormData({});
-          setAdditionalDetails("");
-        }, 2000);
-      } else {
-        setSaveStatus({
-          type: "error",
-          message: "حدث خطأ. يرجى المحاولة مرة أخرى.",
-        });
-      }
+      setSaveStatus({
+        type: "error",
+        message: "حدث خطأ أثناء الحفظ المحلي. يرجى المحاولة مرة أخرى.",
+      });
     } finally {
       setIsSubmitting(false);
     }
   };
 
   const handleDelete = async (docId: string) => {
-    if (docId.startsWith("local_")) {
-      setLogs((prev) => prev.filter((l) => l.id !== docId));
-      const cacheKey = 'cached_standalone_CaseStudies';
-      const cached = localStorage.getItem(cacheKey);
-      if (cached) {
-        const list = JSON.parse(cached).filter((l: any) => l.id !== docId);
-        localStorage.setItem(cacheKey, JSON.stringify(list));
-      }
-      return;
-    }
-
     if (!window.confirm("هل أنت متأكد من حذف هذه الدراسة؟")) return;
 
-    // Optimistically update state & local cache
     setLogs((prev) => prev.filter((l) => l.id !== docId));
-    const cacheKey = 'cached_standalone_CaseStudies';
-    const cached = localStorage.getItem(cacheKey);
-    if (cached) {
-      const list = JSON.parse(cached).filter((l: any) => l.id !== docId);
-      localStorage.setItem(cacheKey, JSON.stringify(list));
-    }
 
     try {
-      await api.delete(`/sync/standalone/CaseStudies/${docId}`);
+      await localDB.caseStudies.delete(docId);
     } catch (e: any) {
       console.error(e);
-      const isNetworkError = !e.response || e.code === 'ERR_NETWORK' || e.message === 'Network Error';
-      if (isNetworkError) {
-        queueSyncRequest(`/sync/standalone/CaseStudies/${docId}`, null, 'DELETE');
-      } else {
-        alert("فشل الحذف من السيرفر");
-      }
+      alert("فشل حذف الدراسة محلياً");
     }
   };
 

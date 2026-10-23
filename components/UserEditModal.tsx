@@ -1,5 +1,6 @@
 import React, { useState, useEffect } from "react";
-import api from "../src/lib/api";
+import { localDB } from "../src/lib/localDB";
+import { stampRecord } from "../src/lib/recordStamping";
 import { useGlobal } from "../context/GlobalState";
 import {
   X,
@@ -1985,8 +1986,14 @@ End Sub`;
             try {
               const results = await Promise.allSettled(
                 newUsersToSave.map(async (u) => {
-                  await api.post('/sync/user', u);
-                  return u;
+                  const existing = u.id ? await localDB.users.get(u.id) : null;
+                  const stamped = stampRecord(
+                    u,
+                    { id: currentUser?.id, name: currentUser?.name },
+                    existing
+                  );
+                  await localDB.users.put(stamped);
+                  return stamped;
                 })
               );
 
@@ -2115,17 +2122,23 @@ End Sub`;
     const performSave = async () => {
       setIsSaving(true);
       try {
-        // 1. Send to server first
-        await api.post('/sync/user', formData);
+        // 1. Stamp and save to localDB first
+        const existing = formData.id ? await localDB.users.get(formData.id) : null;
+        const stampedUser = stampRecord(
+          formData,
+          { id: currentUser?.id, name: currentUser?.name },
+          existing
+        );
+        await localDB.users.put(stampedUser);
 
-        // 2. On success: update local state
-        const existingUserIndex = data.users.findIndex((u) => u.id === formData.id);
+        // 2. Update local state
+        const existingUserIndex = data.users.findIndex((u) => u.id === stampedUser.id);
         let newUsers = [...data.users];
 
         if (existingUserIndex > -1) {
-          newUsers[existingUserIndex] = formData;
+          newUsers[existingUserIndex] = stampedUser;
         } else {
-          newUsers.push(formData);
+          newUsers.push(stampedUser);
         }
 
         const cleanUsers = newUsers.map((u) => {

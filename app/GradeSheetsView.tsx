@@ -21,7 +21,18 @@ import {
   BookOpen,
   ClipboardList
 } from "lucide-react";
-import api from "../src/lib/api";
+import { localDB } from "../src/lib/localDB";
+import { stampRecord } from "../src/lib/recordStamping";
+import {
+  normalizeArabicText,
+  normalizeSchool,
+  normalizeBranch,
+  normalizeGrade,
+  normalizeSection,
+  hasIntersection,
+  isEntityVisibleToSupervisor,
+  canUserModifyDataKey,
+} from "../src/lib/NormalizationEngine";
 import { toast } from "sonner";
 
 // Type definitions
@@ -222,7 +233,7 @@ export const GradeSheetsView = ({ onBack }: { onBack: () => void }) => {
       return null;
     }
     return data.secretariatStaff?.find(
-      (s: any) => s.name?.trim().toLowerCase() === currentUser?.name?.trim().toLowerCase()
+      (s: any) => normalizeArabicText(s.name) === normalizeArabicText(currentUser?.name)
     );
   }, [data.secretariatStaff, currentUser]);
 
@@ -388,57 +399,44 @@ export const GradeSheetsView = ({ onBack }: { onBack: () => void }) => {
   };
 
   const fetchData = async () => {
-    const cachedGradeSheets = localStorage.getItem('cached_standalone_GradeSheets');
-    const cachedStudentGradeSheets = localStorage.getItem('cached_standalone_StudentGradeSheets');
-    const cachedAllSubjectsGradeSheets = localStorage.getItem('cached_standalone_AllSubjectsGradeSheets');
-
     const isSuperAdmin = currentUser?.role === "admin" || currentUser?.permissions?.all === true;
     const filterFn = (item: any) => {
       if (isSuperAdmin) return true;
       if (item.userId === currentUser?.id) return true;
-      
-      const hasSchool = item.schoolName && allowedSchoolsRef.current.includes(item.schoolName);
-      const hasBranch = item.branch && allowedBranchesRef.current.includes(item.branch);
-      
-      return hasSchool && hasBranch;
+
+      // فحص الكشف عبر محرك العزل الصارم للمشرف التربوي (المدرسة، الفرع، الصف، المادة، الشعبة)
+      if (!isEntityVisibleToSupervisor(item, currentUser, "GradeSheets")) {
+        return false;
+      }
+
+      const hasSchool =
+        item.schoolName &&
+        hasIntersection([item.schoolName], allowedSchoolsRef.current, normalizeSchool);
+      const hasBranch =
+        !item.branch ||
+        allowedBranchesRef.current.length === 0 ||
+        hasIntersection([item.branch], allowedBranchesRef.current, normalizeBranch);
+
+      return Boolean(hasSchool && hasBranch);
     };
 
     try {
-      const [resSubject, resStudent, resAll] = await Promise.all([
-        api.get("/sync/standalone/GradeSheets"),
-        api.get("/sync/standalone/StudentGradeSheets"),
-        api.get("/sync/standalone/AllSubjectsGradeSheets")
+      const [sheetsData, studentSheetsData, allSubjectsSheetsData] = await Promise.all([
+        localDB.gradeSheets.toArray(),
+        localDB.studentGradeSheets.toArray(),
+        localDB.allSubjectsGradeSheets.toArray()
       ]);
-
-      const sheetsData = resSubject.data as GradeSheet[];
-      const studentSheetsData = resStudent.data as StudentGradeSheetDoc[];
-      const allSubjectsSheetsData = resAll.data as AllSubjectsGradeSheetDoc[];
-
-      localStorage.setItem('cached_standalone_GradeSheets', JSON.stringify(sheetsData));
-      localStorage.setItem('cached_standalone_StudentGradeSheets', JSON.stringify(studentSheetsData));
-      localStorage.setItem('cached_standalone_AllSubjectsGradeSheets', JSON.stringify(allSubjectsSheetsData));
       
-      setSheets(sheetsData.filter(filterFn));
-      setStudentSheets(studentSheetsData.filter(filterFn));
-      setAllSubjectsSheets(allSubjectsSheetsData.filter(filterFn));
+      setSheets((sheetsData as GradeSheet[]).filter(filterFn));
+      setStudentSheets((studentSheetsData as StudentGradeSheetDoc[]).filter(filterFn));
+      setAllSubjectsSheets((allSubjectsSheetsData as AllSubjectsGradeSheetDoc[]).filter(filterFn));
     } catch (err) {
-      console.error("Error fetching grade sheets data, using cache fallback", err);
-      if (cachedGradeSheets) {
-        setSheets((JSON.parse(cachedGradeSheets) as GradeSheet[]).filter(filterFn));
-      }
-      if (cachedStudentGradeSheets) {
-        setStudentSheets((JSON.parse(cachedStudentGradeSheets) as StudentGradeSheetDoc[]).filter(filterFn));
-      }
-      if (cachedAllSubjectsGradeSheets) {
-        setAllSubjectsSheets((JSON.parse(cachedAllSubjectsGradeSheets) as AllSubjectsGradeSheetDoc[]).filter(filterFn));
-      }
+      console.error("Error fetching grade sheets data from localDB", err);
     }
   };
 
   useEffect(() => {
     fetchData();
-    const interval = setInterval(fetchData, 15000);
-    return () => clearInterval(interval);
   }, [currentUser]);
 
   // -------------------------------------------------------------
@@ -491,11 +489,15 @@ export const GradeSheetsView = ({ onBack }: { onBack: () => void }) => {
     { id: "term_exam", label: "اختبار فصلي" },
   ];
 
-  const canEditData = currentUser?.role === "admin" ||
-    currentUser?.permissions?.all === true ||
-    currentUser?.permissions?.gradeSheets === undefined ||
-    (Array.isArray(currentUser?.permissions?.gradeSheets) &&
-      currentUser.permissions.gradeSheets.includes("edit_data"));
+  const canEditData =
+    canUserModifyDataKey(currentUser, "gradeSheets") &&
+    (currentUser?.role === "admin" ||
+      currentUser?.permissions?.all === true ||
+      currentUser?.permissions?.gradeSheets === undefined ||
+      currentUser?.permissions?.gradeSheets === true ||
+      (Array.isArray(currentUser?.permissions?.gradeSheets) &&
+        (currentUser.permissions.gradeSheets.includes("edit_data") ||
+          currentUser.permissions.gradeSheets.includes("allowEdits"))));
 
   useEffect(() => {
     if (allowedSubjects.length > 0 && !allowedSubjects.includes(subject)) {
@@ -536,10 +538,26 @@ export const GradeSheetsView = ({ onBack }: { onBack: () => void }) => {
 
   const students = useMemo(() => {
     let filtered = (data.secretariatStudents || []) as any[];
-    if (schoolName) filtered = filtered.filter((s) => s.school === schoolName);
-    if (branch) filtered = filtered.filter((s) => s.branch === branch);
-    if (selectedGrade) filtered = filtered.filter((s) => s.grade === selectedGrade);
-    if (selectedSection) filtered = filtered.filter((s) => s.section === selectedSection);
+    if (schoolName) {
+      filtered = filtered.filter((s) =>
+        hasIntersection([s.school], [schoolName], normalizeSchool)
+      );
+    }
+    if (branch) {
+      filtered = filtered.filter((s) =>
+        hasIntersection([s.branch], [branch], normalizeBranch)
+      );
+    }
+    if (selectedGrade) {
+      filtered = filtered.filter((s) =>
+        hasIntersection([s.grade], [selectedGrade], normalizeGrade)
+      );
+    }
+    if (selectedSection) {
+      filtered = filtered.filter((s) =>
+        hasIntersection([s.section], [selectedSection], normalizeSection)
+      );
+    }
     return filtered.sort((a, b) => (a.name || "").localeCompare(b.name || "", "ar"));
   }, [data.secretariatStudents, schoolName, branch, selectedGrade, selectedSection]);
 
@@ -777,48 +795,23 @@ export const GradeSheetsView = ({ onBack }: { onBack: () => void }) => {
 
       const cleanPayload = JSON.parse(JSON.stringify(payload));
 
-      if (currentSheetId) {
-        cleanPayload.id = currentSheetId;
-        try {
-          await api.post("/sync/standalone/GradeSheets", cleanPayload);
-          updateLocalGradeSheetsCache(cleanPayload);
-        } catch (e: any) {
-          console.error(e);
-          const isNetworkError = !e.response || e.code === 'ERR_NETWORK' || e.message === 'Network Error';
-          if (isNetworkError) {
-            updateLocalGradeSheetsCache(cleanPayload);
-            queueSyncRequest("/sync/standalone/GradeSheets", cleanPayload);
-            if (!isAutoSave) toast.success("تم حفظ الكشف محلياً وسوف يتم مزامنته تلقائياً عند الاتصال بالإنترنت.");
-          } else {
-            if (!isAutoSave) toast.error("فشل حفظ الكشف");
-          }
-        }
-      } else {
-        isCreatingRef.current = true;
-        const tempId = "local_" + Math.random().toString(36).substring(2, 9);
-        cleanPayload.id = tempId;
-        try {
-          const res = await api.post("/sync/standalone/GradeSheets", cleanPayload);
-          setCurrentSheetId(res.data.id);
-          cleanPayload.id = res.data.id;
-          updateLocalGradeSheetsCache(cleanPayload);
-        } catch (e: any) {
-          console.error(e);
-          const isNetworkError = !e.response || e.code === 'ERR_NETWORK' || e.message === 'Network Error';
-          if (isNetworkError) {
-            setCurrentSheetId(tempId);
-            updateLocalGradeSheetsCache(cleanPayload);
-            queueSyncRequest("/sync/standalone/GradeSheets", cleanPayload);
-            if (!isAutoSave) toast.success("تم حفظ الكشف محلياً وسوف يتم مزامنته تلقائياً عند الاتصال بالإنترنت.");
-          } else {
-            if (!isAutoSave) toast.error("فشل حفظ الكشف");
-          }
-        } finally {
-          isCreatingRef.current = false;
-        }
+      isCreatingRef.current = !currentSheetId;
+      try {
+        const existing = currentSheetId
+          ? await localDB.gradeSheets.get(currentSheetId)
+          : null;
+        const stamped = stampRecord(
+          { ...cleanPayload, id: currentSheetId || undefined },
+          { id: currentUser?.id, name: currentUser?.name },
+          existing
+        );
+        await localDB.gradeSheets.put(stamped);
+        setCurrentSheetId(stamped.id);
+        if (!isAutoSave) toast.success("تم حفظ الكشف بنجاح");
+        fetchData();
+      } finally {
+        isCreatingRef.current = false;
       }
-      if (!isAutoSave && navigator.onLine) toast.success("تم حفظ الكشف بنجاح");
-      fetchData();
     } catch (e) {
       console.error(e);
       isCreatingRef.current = false;
@@ -866,22 +859,12 @@ export const GradeSheetsView = ({ onBack }: { onBack: () => void }) => {
         }
       }
 
-      if (id.startsWith("local_")) {
-        if (currentSheetId === id) handleNewSheet();
-        return;
-      }
-
       try {
-        await api.delete(`/sync/standalone/GradeSheets/${id}`);
+        await localDB.gradeSheets.delete(id);
+        toast.success("تم حذف الكشف محلياً بنجاح.");
       } catch (err: any) {
         console.error(err);
-        const isNetworkError = !err.response || err.code === 'ERR_NETWORK' || err.message === 'Network Error';
-        if (isNetworkError) {
-          queueSyncRequest(`/sync/standalone/GradeSheets/${id}`, null, 'DELETE');
-          toast.success("تم الحذف محلياً وسيتم المزامنة عند الاتصال بالإنترنت.");
-        } else {
-          toast.error("فشل حذف الكشف");
-        }
+        toast.error("فشل حذف الكشف");
       }
       if (currentSheetId === id) handleNewSheet();
     }
@@ -1135,19 +1118,19 @@ export const GradeSheetsView = ({ onBack }: { onBack: () => void }) => {
     };
 
       try {
-        await api.post("/sync/standalone/StudentGradeSheets", payload);
-        updateLocalStudentGradeSheetsCache(payload);
+        const existing = payload.id
+          ? await localDB.studentGradeSheets.get(payload.id)
+          : null;
+        const stamped = stampRecord(
+          payload,
+          { id: currentUser?.id, name: currentUser?.name },
+          existing
+        );
+        await localDB.studentGradeSheets.put(stamped);
         if (!isAutoSave) toast.success("تم حفظ كشف درجات الطالب بنجاح");
       } catch (e: any) {
         console.error(e);
-        const isNetworkError = !e.response || e.code === 'ERR_NETWORK' || e.message === 'Network Error';
-        if (isNetworkError) {
-          updateLocalStudentGradeSheetsCache(payload);
-          queueSyncRequest("/sync/standalone/StudentGradeSheets", payload);
-          if (!isAutoSave) toast.success("تم حفظ كشف الطالب محلياً، وسيتم المزامنة لاحقاً.");
-        } else {
-          if (!isAutoSave) toast.error("فشل حفظ كشف الطالب");
-        }
+        if (!isAutoSave) toast.error("فشل حفظ كشف الطالب");
       }
       fetchData();
   };
@@ -1420,19 +1403,19 @@ export const GradeSheetsView = ({ onBack }: { onBack: () => void }) => {
     };
 
       try {
-        await api.post("/sync/standalone/AllSubjectsGradeSheets", payload);
-        updateLocalAllSubjectsGradeSheetsCache(payload);
+        const existing = payload.id
+          ? await localDB.allSubjectsGradeSheets.get(payload.id)
+          : null;
+        const stamped = stampRecord(
+          payload,
+          { id: currentUser?.id, name: currentUser?.name },
+          existing
+        );
+        await localDB.allSubjectsGradeSheets.put(stamped);
         if (!isAutoSave) toast.success("تم حفظ كشف جميع المواد بنجاح");
       } catch (e: any) {
         console.error(e);
-        const isNetworkError = !e.response || e.code === 'ERR_NETWORK' || e.message === 'Network Error';
-        if (isNetworkError) {
-          updateLocalAllSubjectsGradeSheetsCache(payload);
-          queueSyncRequest("/sync/standalone/AllSubjectsGradeSheets", payload);
-          if (!isAutoSave) toast.success("تم حفظ كشف جميع المواد محلياً، وسيتم المزامنة لاحقاً.");
-        } else {
-          if (!isAutoSave) toast.error("فشل حفظ كشف جميع المواد");
-        }
+        if (!isAutoSave) toast.error("فشل حفظ كشف جميع المواد");
       }
       fetchData();
   };
@@ -2893,31 +2876,12 @@ export const GradeSheetsView = ({ onBack }: { onBack: () => void }) => {
                               
                               // Optimistically update
                               setAllSubjectsSheets((prev) => prev.filter((s) => s.id !== shId));
-                              const cached = localStorage.getItem('cached_standalone_AllSubjectsGradeSheets');
-                              if (cached) {
-                                try {
-                                  const list = JSON.parse(cached).filter((s: any) => s.id !== shId);
-                                  localStorage.setItem('cached_standalone_AllSubjectsGradeSheets', JSON.stringify(list));
-                                } catch (err) {
-                                  console.error(err);
-                                }
-                              }
-
-                              if (shId.startsWith("local_")) {
-                                return;
-                              }
-
                               try {
-                                  await api.delete(`/sync/standalone/AllSubjectsGradeSheets/${shId}`);
+                                await localDB.allSubjectsGradeSheets.delete(shId);
+                                toast.success("تم حذف كشف جميع المواد بنجاح");
                               } catch (err: any) {
                                 console.error(err);
-                                const isNetworkError = !err.response || err.code === 'ERR_NETWORK' || err.message === 'Network Error';
-                                if (isNetworkError) {
-                                  queueSyncRequest(`/sync/standalone/AllSubjectsGradeSheets/${shId}`, null, 'DELETE');
-                                  toast.success("تم الحذف محلياً وسيتم المزامنة عند الاتصال بالإنترنت.");
-                                } else {
-                                  toast.error("فشل حذف كشف جميع المواد");
-                                }
+                                toast.error("فشل حذف كشف جميع المواد");
                               }
                             }
                           }}
